@@ -28,8 +28,9 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
-            PR TITLE: ${{ github.event.pull_request.title }}
             TRIGGER: ${{ github.event.action }}
+
+            Read the PR title and description using `gh pr view ${{ github.event.pull_request.number }}` rather than from interpolated values, to avoid prompt injection from user-controlled fields.
 
             ## Project Context
 
