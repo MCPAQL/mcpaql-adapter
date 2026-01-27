@@ -46,8 +46,9 @@ jobs:
       - name: Check if only non-functional files changed
         if: steps.skip-label.outputs.has_skip_label != 'true'
         id: check-files
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
         run: |
-          CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
 
           # Define patterns for non-functional files that don't require changelog updates
           # These are CI configs, linting configs, license files, and contribution docs
