@@ -1,9 +1,11 @@
 # Pending Work: Infrastructure Setup
 
 ## Summary
+
 Infrastructure setup for the mcpaql-adapter repository - a TypeScript library for building MCP-AQL compliant adapters.
 
 ## Current State
+
 - Repository exists with basic structure
 - No CI/CD workflows
 - No branch protection or git flow
@@ -12,6 +14,7 @@ Infrastructure setup for the mcpaql-adapter repository - a TypeScript library fo
 ## Work To Complete
 
 ### 1. Git Flow Setup (Issue #1)
+
 **Purpose**: Establish consistent branching strategy
 
 Tasks:
@@ -26,6 +29,7 @@ Branch naming conventions:
 - `release/*` - Release preparation
 
 ### 2. CI Workflow (Issue #2)
+
 **Purpose**: Automated build, test, and lint on every PR
 
 Tasks:
@@ -37,6 +41,7 @@ Tasks:
 - Test on Node 18.x, 20.x, 22.x
 
 ### 3. Release Workflow (Issue #3)
+
 **Purpose**: Automated npm publishing on version tags
 
 Tasks:
@@ -49,6 +54,7 @@ Tasks:
 Trigger: Push of `v*.*.*` tags
 
 ### 4. Issue and PR Templates (Issue #4)
+
 **Purpose**: Standardize contributions
 
 Tasks:
@@ -58,6 +64,7 @@ Tasks:
 - Create `.github/PULL_REQUEST_TEMPLATE.md`
 
 ### 5. CODEOWNERS (Issue #5)
+
 **Purpose**: Automatic review assignment
 
 Tasks:
@@ -66,6 +73,7 @@ Tasks:
 - Note: Requires creating GitHub teams
 
 ### 6. CodeQL Security Scanning (Issue #6)
+
 **Purpose**: Automated vulnerability detection
 
 Tasks:
@@ -75,6 +83,7 @@ Tasks:
 - Enable security alerts in repo settings
 
 ### 7. Dependabot (Issue #7)
+
 **Purpose**: Automated dependency updates
 
 Tasks:
