@@ -31,4 +31,10 @@ Artifacts intended to be consumed by tooling/implementations:
 
 ## Commercial licensing
 
-Commercial licenses are available: see `COMMERCIAL-LICENSE.md` or contact `licensing@mcpaql.org`.
+Commercial licenses are available for organizations that prefer not to use the AGPL:
+
+- **Overview**: see `COMMERCIAL-LICENSE.md`
+- **Full terms**: see `COMMERCIAL-LICENSE-TERMS.md`
+- **Contact**: `licensing@mcpaql.org`
+
+Organizations with less than $1,000,000 USD in annual revenue may self-certify for a free commercial license. See `COMMERCIAL-LICENSE.md` for details.
