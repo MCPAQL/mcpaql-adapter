@@ -29,6 +29,23 @@ For **normative protocol specifications** (wire format, schema semantics, interf
 | Document | Description |
 |----------|-------------|
 | [Development Guide](docs/guides/development.md) | How to build MCP-AQL adapters |
+| [Testing Guide](docs/guides/testing.md) | Testing patterns for adapters |
+| [Migration Guide](docs/guides/migration.md) | Migrating from MCP server to MCP-AQL adapter |
+
+### Architecture Decision Records
+
+| ADR | Title |
+|-----|-------|
+| [ADR-001](docs/adr/ADR-001-plugin-pipeline-order.md) | Plugin Pipeline Order |
+| [ADR-002](docs/adr/ADR-002-schema-driven-dispatch.md) | Schema-Driven Dispatch over Code Generation |
+| [ADR-003](docs/adr/ADR-003-stateless-plugins.md) | Stateless Singleton Plugins |
+
+### Examples
+
+| Example | Description |
+|---------|-------------|
+| [Minimal Adapter](examples/minimal-adapter.ts) | Bare-minimum adapter with introspection |
+| [User Management](examples/user-management-adapter.ts) | Full CRUDE adapter with all endpoints |
 
 ## Relationship to Spec
 

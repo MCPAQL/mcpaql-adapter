@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0-draft
 **Status:** Draft
-**Last Updated:** 2026-01-14
+**Last Updated:** 2026-01-26
 **Moved from:** [MCPAQL/spec](https://github.com/MCPAQL/spec) (formerly `docs/adapter/development-guide.md`)
 
 > **Note:** This guide provides practical **implementation instructions** for building MCP-AQL adapters. For normative protocol specifications, see the [spec repository](https://github.com/MCPAQL/spec).
@@ -72,12 +72,20 @@ Before starting, review:
 
 ### 2.3 Development Environment
 
+| Dependency | Minimum Version | Notes |
+|------------|----------------|-------|
+| Node.js | 18.0.0 | LTS recommended (20.x or 22.x) |
+| TypeScript | 5.0.0 | Required for type-safe adapter development |
+| `@modelcontextprotocol/sdk` | 1.0.0 | MCP server and transport primitives |
+
 ```bash
-# Typical setup
-node >= 18.0.0
-typescript >= 5.0.0
-@modelcontextprotocol/sdk >= 1.0.0
+# Quick setup
+npm init -y
+npm install @modelcontextprotocol/sdk
+npm install -D typescript tsx @types/node
 ```
+
+> **Note:** Exact version constraints will be documented in `package.json` once the reference implementation source code is added to this repository.
 
 ---
 

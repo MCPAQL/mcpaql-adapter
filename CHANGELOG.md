@@ -15,4 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docs/architecture/dispatch.md` - Schema-driven dispatch pattern
   - `docs/architecture/overview.md` - Architecture overview
   - `docs/guides/development.md` - Adapter development guide
-- Updated README.md with repository purpose and document index
+- Testing guide with patterns for unit, integration, and conformance testing
+- Migration guide for converting MCP servers to MCP-AQL adapters
+- Architecture Decision Records (ADRs)
+  - ADR-001: Plugin Pipeline Order
+  - ADR-002: Schema-Driven Dispatch over Code Generation
+  - ADR-003: Stateless Singleton Plugins
+- Example adapter implementations
+  - `examples/minimal-adapter.ts` - Bare-minimum adapter with introspection
+  - `examples/user-management-adapter.ts` - Full CRUDE adapter with all endpoints
+- Split licensing documentation (`LICENSING.md`, `LICENSE-DOCS`)
+- Updated README.md with repository purpose, document index, guides, ADRs, and examples
+
+### Changed
+
+- Standardized documentation dates to 2026-01-26
+- Expanded development guide prerequisites with dependency table and setup commands

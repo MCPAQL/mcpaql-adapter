@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0-draft
 **Status:** Draft (MVP)
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-01-26
 **Moved from:** [MCPAQL/spec](https://github.com/MCPAQL/spec) (implementation portions of `docs/architecture/plugin-interface.md`)
 
 > **Note:** This document describes the **implementation architecture** of the plugin system. For normative plugin interface contracts (what each plugin type MUST provide), see the [Plugin Interface Contracts](https://github.com/MCPAQL/spec/blob/develop/docs/plugin-contracts.md) in the spec repository.

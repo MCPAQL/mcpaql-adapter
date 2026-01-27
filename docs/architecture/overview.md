@@ -2,7 +2,7 @@
 
 **Version:** 1.0.0-draft
 **Status:** Draft
-**Last Updated:** 2026-01-14
+**Last Updated:** 2026-01-26
 **Moved from:** [MCPAQL/spec](https://github.com/MCPAQL/spec) (formerly `docs/architecture/overview.md`)
 
 > **Note:** This document describes the **implementation architecture** for MCP-AQL adapters. For normative protocol specifications, see the [spec repository](https://github.com/MCPAQL/spec).
