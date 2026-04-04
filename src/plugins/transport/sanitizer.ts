@@ -107,7 +107,14 @@ function sanitizeText(
   value: unknown,
   language: "AppleScript" | "JavaScript",
 ): string {
-  const str = String(value);
+  if (typeof value !== "string") {
+    throw new SanitizationError(
+      "SANITIZE_TYPE_MISMATCH",
+      name,
+      `Expected string for text parameter '${name}', got ${typeof value}.`,
+    );
+  }
+  const str = value;
   validateStringConstraints(name, str);
 
   if (language === "JavaScript") {
@@ -329,7 +336,7 @@ function sanitizeDateForAppleScript(date: Date): string {
   const h = pad(date.getHours());
   const min = pad(date.getMinutes());
   const s = pad(date.getSeconds());
-  // This format works with AppleScript's date coercion
+  // Best-effort format; reliability depends on macOS locale. See WARNING above.
   return `${y}-${m}-${d} ${h}:${min}:${s}`;
 }
 
@@ -415,14 +422,20 @@ function validateIdentifier(paramName: string, key: string): void {
  *
  * @param template - The template text with `{{param_name}}` placeholders
  * @param sanitizedParams - Parameters that have ALREADY been sanitized via sanitizeParam()
+ * @param optionalParams - Set of parameter names that are optional; their placeholders
+ *   are left as-is if not provided in sanitizedParams
  * @returns The interpolated script text ready for osascript
  */
 export function interpolateTemplate(
   template: string,
   sanitizedParams: Record<string, string>,
+  optionalParams?: ReadonlySet<string>,
 ): string {
   return template.replace(/\{\{(\w+)\}\}/g, (match, paramName: string) => {
     if (!(paramName in sanitizedParams)) {
+      if (optionalParams?.has(paramName)) {
+        return match; // Leave placeholder for optional params not supplied
+      }
       throw new SanitizationError(
         "SANITIZE_UNDEFINED_PARAM",
         paramName,

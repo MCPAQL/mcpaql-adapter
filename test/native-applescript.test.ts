@@ -17,6 +17,7 @@ import {
   executeOperation,
   APPLE_MAIL_TEMPLATES,
 } from "../src/plugins/transport/native-applescript.js";
+import { SanitizationError } from "../src/plugins/transport/sanitizer.js";
 import type { ScriptTemplate } from "../src/plugins/transport/types.js";
 
 const isMacOS = platform() === "darwin";
@@ -174,6 +175,78 @@ test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR when interpolateTem
   };
   const config = { application: "TestApp" };
   const result = await executeOperation(config, template, {});
+  assert.equal(result.success, false);
+  assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
+  assert.match(result.error!.message, /name/);
+});
+
+// --- Required/optional param validation ---
+
+test("buildScript: throws SanitizationError for missing required param", () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "const x = {{name}};",
+    params: { name: "text" }, // required by default (string shorthand)
+  };
+  assert.throws(
+    () => buildScript(template, {}),
+    (error: unknown) =>
+      error instanceof SanitizationError &&
+      error.code === "SANITIZE_MISSING_REQUIRED_PARAM" &&
+      error.message.includes("name"),
+  );
+});
+
+test("buildScript: skips optional params silently", () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "const x = 1;", // Template does NOT reference the optional param
+    params: { limit: { type: "integer", optional: true } },
+  };
+  // Should not throw even though `limit` is not supplied
+  const script = buildScript(template, {});
+  assert.equal(script, "const x = 1;");
+});
+
+test("buildScript: leaves placeholder for optional param referenced in template but not supplied", () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "const limit = {{limit}};",
+    params: { limit: { type: "integer", optional: true } },
+  };
+  // Should not throw; placeholder left as-is for optional params
+  const script = buildScript(template, {});
+  assert.equal(script, "const limit = {{limit}};");
+});
+
+// --- executeOperation catch-all error path ---
+
+test("executeOperation: returns structured error on osascript failure, never throws", async () => {
+  // Use a template that produces intentionally invalid script to trigger osascript error
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "this is not valid code!!;",
+    params: {},
+  };
+  const config = { application: "TestApp" };
+  const result = await executeOperation(config, template, {});
+  // On macOS this will execute and fail inside osascript (ok: false)
+  // On non-macOS this will be caught by the catch-all and returned as structured error
+  // Either way: it should NOT throw
+  assert.equal(result.success, false);
+  assert.ok(result.error, "Expected error in result");
+  assert.ok(result.error!.code, "Expected error code");
+  assert.ok(result.error!.message, "Expected error message");
+});
+
+test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR for non-string text param", async () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "const x = {{name}};",
+    params: { name: "text" },
+  };
+  const config = { application: "TestApp" };
+  const result = await executeOperation(config, template, { name: 123 });
   assert.equal(result.success, false);
   assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
   assert.match(result.error!.message, /name/);

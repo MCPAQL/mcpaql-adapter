@@ -61,6 +61,26 @@ test("sanitizeParam text: rejects strings exceeding max length", () => {
   );
 });
 
+test("sanitizeParam text: throws SanitizationError for non-string text value", () => {
+  assert.throws(
+    () => sanitizeParam("name", 42, "text"),
+    (error: unknown) =>
+      error instanceof SanitizationError &&
+      error.code === "SANITIZE_TYPE_MISMATCH" &&
+      error.message.includes("name") &&
+      error.message.includes("number"),
+  );
+});
+
+test("sanitizeParam text: throws SanitizationError for boolean text value", () => {
+  assert.throws(
+    () => sanitizeParam("flag", true, "text"),
+    (error: unknown) =>
+      error instanceof SanitizationError &&
+      error.code === "SANITIZE_TYPE_MISMATCH",
+  );
+});
+
 // --- Injection prevention ---
 
 test("sanitizeParam text: prevents tell application injection via quotes", () => {

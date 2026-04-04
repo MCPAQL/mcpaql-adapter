@@ -37,6 +37,24 @@ export interface NativeAppleScriptConfig {
 }
 
 /**
+ * Definition of a single parameter within a script template.
+ */
+export interface ScriptParamDef {
+  /**
+   * The expected AppleScript type for this parameter.
+   */
+  type: AppleScriptParamType;
+
+  /**
+   * Whether this parameter is optional.
+   * Optional parameters may be omitted without error; the template must
+   * handle missing values (e.g., provide a default in the script body).
+   * @default false
+   */
+  optional?: boolean;
+}
+
+/**
  * A parameterized AppleScript template.
  * Parameters are referenced as `{{param_name}}` in the template text.
  * All parameters are sanitized before interpolation.
@@ -55,8 +73,11 @@ export interface ScriptTemplate {
   /**
    * Expected parameter names and their AppleScript types.
    * Used for validation and serialization.
+   *
+   * Each value may be either a bare type string (shorthand for required params)
+   * or a full `ScriptParamDef` object that includes an `optional` flag.
    */
-  params: Record<string, AppleScriptParamType>;
+  params: Record<string, AppleScriptParamType | ScriptParamDef>;
 }
 
 /**
