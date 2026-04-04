@@ -4,6 +4,7 @@ AGPL
 applescript
 AQL
 async
+bidi
 camelCase
 cff
 changelog
@@ -20,11 +21,12 @@ Fto
 gRPC
 idempotent
 introspect
-JXA
-jxa
 introspection
+jxa
+JXA
 LLM
 LLMs
+LRU
 MCP
 MCPAQL
 msgpack
@@ -32,11 +34,12 @@ mtls
 osascript
 params
 protobuf
-sdef
 reimplementation
 schemas
+sdef
 semver
 snake_case
+TTL
 unstar
 validators
 Vitest
