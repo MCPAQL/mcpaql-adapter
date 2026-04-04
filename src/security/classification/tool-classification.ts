@@ -108,6 +108,8 @@ const DANGEROUS_BASH_PATTERNS = [
   'perl -e *', 'ruby -e *',
   // Subprocess execution wrappers
   'bash -c *', 'sh -c *', 'zsh -c *', '/bin/bash -c *', '/bin/sh -c *',
+  // Bare shell invocation with arguments (catches bash "$(…)", bash <file>, etc.)
+  'bash *', '/bin/bash *', '/bin/sh *',
   // Process substitution
   '*<(*',
   // Encoded payload execution
@@ -158,6 +160,18 @@ export function classifyTool(
   return { riskLevel: 'moderate', behavior: 'evaluate', reason: `Unknown tool '${toolName}', requires policy evaluation` };
 }
 
+/**
+ * Detect inline command substitution ($() or backticks) that could
+ * smuggle arbitrary execution inside an otherwise-safe command.
+ */
+function containsCommandSubstitution(command: string): boolean {
+  // $(...) — command substitution
+  if (/\$\(/.test(command)) return true;
+  // `...` — backtick substitution (but not markdown-style triple backticks)
+  if (/(?<!`)`(?!`)[^`]*`(?!`)/.test(command)) return true;
+  return false;
+}
+
 function classifyBashCommand(
   toolInput: Record<string, unknown>
 ): ToolClassificationResult {
@@ -177,6 +191,16 @@ function classifyBashCommand(
     if (matchesPattern(command, pattern)) {
       return { riskLevel: 'dangerous', behavior: 'deny', reason: `Dangerous command pattern: ${pattern}` };
     }
+  }
+
+  // Command substitution ($() or backticks) smuggles arbitrary execution
+  // into otherwise-safe commands — never auto-allow.
+  if (containsCommandSubstitution(command)) {
+    return {
+      riskLevel: 'dangerous',
+      behavior: 'deny',
+      reason: 'Command contains inline substitution ($() or backticks)',
+    };
   }
 
   for (const pattern of SAFE_BASH_PATTERNS) {
