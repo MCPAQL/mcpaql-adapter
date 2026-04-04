@@ -1,6 +1,7 @@
 ADR
 ADRs
 AGPL
+applescript
 AQL
 async
 camelCase
@@ -26,8 +27,10 @@ MCP
 MCPAQL
 msgpack
 mtls
+osascript
 params
 protobuf
+sdef
 reimplementation
 schemas
 semver

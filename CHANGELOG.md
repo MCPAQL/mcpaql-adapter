@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native AppleScript transport plugin (`src/plugins/transport/`)
+  - `native-applescript.ts` - Transport plugin for macOS application automation via osascript
+  - `sanitizer.ts` - Parameter sanitization and injection prevention (AppleScript equivalent of SQL parameterization)
+  - `serializer.ts` - AppleScript output to JSON serialization and JXA JSON wrapper
+  - `types.ts` - Type definitions for script templates, configs, and results
+  - Predefined JXA templates for Apple Mail operations
+- TypeScript project infrastructure (`package.json`, `tsconfig.json`)
+- 83 unit tests covering sanitization, serialization, template interpolation, injection prevention, and osascript execution
 - Initial architecture documentation migrated from spec repository
   - `docs/architecture/runtime.md` - Universal adapter runtime specification
   - `docs/architecture/plugin-system.md` - Plugin system implementation details

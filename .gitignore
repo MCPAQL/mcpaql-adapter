@@ -20,6 +20,10 @@ Desktop.ini
 # Logs
 *.log
 
+# Node.js
+node_modules/
+dist/
+
 # Env files (local only)
 .env
 .env.*
