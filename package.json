@@ -1,0 +1,17 @@
+{
+  "name": "@mcpaql/adapter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference implementation of the MCP-AQL adapter runtime with plugin system",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

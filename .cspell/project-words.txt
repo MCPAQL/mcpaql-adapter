@@ -1,6 +1,7 @@
 ADR
 ADRs
 AGPL
+applescript
 AQL
 async
 camelCase
@@ -19,6 +20,8 @@ Fto
 gRPC
 idempotent
 introspect
+JXA
+jxa
 introspection
 LLM
 LLMs
@@ -26,8 +29,10 @@ MCP
 MCPAQL
 msgpack
 mtls
+osascript
 params
 protobuf
+sdef
 reimplementation
 schemas
 semver
