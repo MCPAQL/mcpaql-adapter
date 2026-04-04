@@ -95,8 +95,10 @@ export interface NormalizationResult<T = unknown> {
   data: T;
   /** Whether normalization detected any issues */
   hasIssues: boolean;
-  /** Whether critical issues were detected that should fail validation */
+  /** Whether critical-severity issues were detected that should fail validation */
   hasCriticalIssues: boolean;
+  /** Whether high or critical severity issues were detected */
+  hasHighOrCriticalIssues: boolean;
   /** All errors detected during normalization (critical issues) */
   errors: string[];
   /** All warnings detected during normalization (non-critical issues) */

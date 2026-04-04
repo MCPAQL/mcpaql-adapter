@@ -102,6 +102,10 @@ const DANGEROUS_BASH_PATTERNS = [
   '*; rm -rf *', '*&& rm -rf *', '*|| rm -rf *',
   '*; sudo *', '*&& sudo *', '*|| sudo *',
   '*; eval *', '*&& eval *',
+  // Inline interpreter execution
+  'python -c *', 'python3 -c *',
+  'node -e *', 'node --eval *',
+  'perl -e *', 'ruby -e *',
   // Subprocess execution wrappers
   'bash -c *', 'sh -c *', 'zsh -c *', '/bin/bash -c *', '/bin/sh -c *',
   // Process substitution

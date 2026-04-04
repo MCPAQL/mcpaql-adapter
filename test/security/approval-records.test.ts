@@ -244,6 +244,34 @@ describe('ApprovalSession', () => {
       assert.equal(remaining[0].toolName, 'Edit');
     });
 
+    it('should evict stale consumed approval records', () => {
+      // Create and approve+consume several records
+      for (let i = 0; i < 5; i++) {
+        const id = session.createCliApprovalRequest(
+          `Tool${i}`, {}, 'dangerous', 80, false, 'test'
+        );
+        session.approveCliRequest(id, 'single');
+        // Consume the approval
+        session.checkCliApproval(`Tool${i}`, {});
+      }
+
+      // Verify records exist (consumed but still in map)
+      const summary1 = session.getSummary();
+      assert.equal(summary1.cliApprovalCount, 5);
+
+      // Backdate all records past the default TTL (5 min)
+      for (const [, record] of (session as any).state.cliApprovals) {
+        (record as any).requestedAt = new Date(Date.now() - 600_000).toISOString();
+      }
+
+      // Trigger forced expiry sweep
+      session.getPendingCliApprovals();
+
+      // All consumed + stale records should be evicted
+      const summary2 = session.getSummary();
+      assert.equal(summary2.cliApprovalCount, 0, 'Stale consumed records should be evicted');
+    });
+
     it('should use per-record ttlMs when set', () => {
       session.createCliApprovalRequest(
         'Bash', { command: 'npm install' }, 'dangerous', 80, false, 'test', undefined, 60_000

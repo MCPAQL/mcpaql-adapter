@@ -172,6 +172,35 @@ describe('InputNormalizer', () => {
     });
   });
 
+  describe('severity distinction - hasCriticalIssues vs hasHighOrCriticalIssues', () => {
+    it('should set hasCriticalIssues=false and hasHighOrCriticalIssues=true for high-severity issues', () => {
+      // Direction override chars produce high severity (not critical)
+      const input = 'test\u202Evalue';
+      const result = InputNormalizer.normalize(input);
+
+      assert.equal(result.maxSeverity, 'high');
+      assert.equal(result.hasCriticalIssues, false, 'high severity should not be critical');
+      assert.equal(result.hasHighOrCriticalIssues, true, 'high severity should be high-or-critical');
+    });
+
+    it('should set both flags to false for medium-severity issues', () => {
+      // Zero-width chars alone produce medium severity
+      const input = 'test\u200Bvalue';
+      const result = InputNormalizer.normalize(input);
+
+      assert.equal(result.maxSeverity, 'medium');
+      assert.equal(result.hasCriticalIssues, false);
+      assert.equal(result.hasHighOrCriticalIssues, false);
+    });
+
+    it('should set both flags to false for clean input', () => {
+      const result = InputNormalizer.normalize('clean text');
+
+      assert.equal(result.hasCriticalIssues, false);
+      assert.equal(result.hasHighOrCriticalIssues, false);
+    });
+  });
+
   describe('needsNormalization', () => {
     it('should return false for clean strings', () => {
       assert.equal(InputNormalizer.needsNormalization('hello world'), false);

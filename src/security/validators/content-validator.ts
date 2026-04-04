@@ -52,7 +52,10 @@ export class ContentValidator {
     { pattern: /forget\s+your\s+training/gi, severity: 'critical', description: 'Instruction override' },
     { pattern: /override\s+your\s+programming/gi, severity: 'critical', description: 'Instruction override' },
     { pattern: /you\s+are\s+now\s+(admin|root|system|sudo)/gi, severity: 'critical', description: 'Role elevation attempt' },
-    { pattern: /act\s+as\s+(admin|root|system|sudo)/gi, severity: 'critical', description: 'Role elevation attempt' },
+    { pattern: /act\s+as\s+\w+/gi, weight: 7, severity: 'critical', description: 'Role assumption attempt' },
+    { pattern: /pretend\s+(you\s+)?(have\s+no|are\s+not|don't\s+have)\s+(guidelines|restrictions|rules)/gi, severity: 'critical', description: 'Guideline removal attempt' },
+    { pattern: /(you\s+are|you're)\s+now\s+in\s+(developer|debug|admin|test)\s+mode/gi, severity: 'critical', description: 'Mode elevation attempt' },
+    { pattern: /jailbreak|DAN\s+mode|do\s+anything\s+now/gi, severity: 'critical', description: 'Known jailbreak pattern' },
 
     // Data exfiltration attempts
     { pattern: /export\s+all\s+(files|data|personas|tokens|credentials|api\s+keys)/gi, severity: 'critical', description: 'Data exfiltration' },
@@ -61,8 +64,8 @@ export class ContentValidator {
     { pattern: /show\s+me\s+all\s+(tokens|credentials|secrets|api\s+keys)/gi, severity: 'high', description: 'Credential disclosure' },
 
     // Command execution patterns
-    { pattern: /curl\s+[^\s]+\.(com|net|org|io|dev)/gi, severity: 'critical', description: 'External command execution' },
-    { pattern: /wget\s+[^\s]+\.(com|net|org|io|dev)/gi, severity: 'critical', description: 'External command execution' },
+    { pattern: /curl\s+[^\s]{1,500}/gi, severity: 'critical', description: 'External command execution' },
+    { pattern: /wget\s+[^\s]{1,500}/gi, severity: 'critical', description: 'External command execution' },
     { pattern: /\$\([^)]+\)/g, severity: 'critical', description: 'Command substitution' },
     { pattern: /`[^`]{0,200}(?:rm\s+-rf?\s+[/~]|sudo\s+rm|chmod\s+777|chown\s+root)[^`]{0,200}`/gi, severity: 'critical', description: 'Dangerous shell command in backticks' },
     { pattern: /`[^`]{0,200}(?:cat|ls)\s+\/etc\/[^`]{0,200}`/gi, severity: 'critical', description: 'Sensitive file access in backticks' },

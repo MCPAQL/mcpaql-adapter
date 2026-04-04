@@ -77,12 +77,14 @@ export class InputNormalizer {
     const normalizedData = normalizeValue(input, path) as T;
 
     const hasIssues = errors.length > 0 || warnings.length > 0;
-    const hasCriticalIssues = maxSeverity === 'critical' || maxSeverity === 'high';
+    const hasCriticalIssues = maxSeverity === 'critical';
+    const hasHighOrCriticalIssues = maxSeverity === 'critical' || maxSeverity === 'high';
 
     return {
       data: normalizedData,
       hasIssues,
       hasCriticalIssues,
+      hasHighOrCriticalIssues,
       errors,
       warnings,
       issuesByPath,

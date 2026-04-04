@@ -56,6 +56,11 @@ export class UnicodeValidator {
     ['\u03B8', 'th'], ['\u03B9', 'i'], ['\u03BA', 'k'], ['\u03BB', 'l'], ['\u03BC', 'm'], ['\u03BD', 'n'], ['\u03BE', 'x'],
     ['\u03BF', 'o'], ['\u03C0', 'p'], ['\u03C1', 'r'], ['\u03C3', 's'], ['\u03C4', 't'], ['\u03C5', 'u'], ['\u03C6', 'f'],
     ['\u03C7', 'ch'], ['\u03C8', 'ps'], ['\u03C9', 'w'],
+    // Uppercase Greek to Latin
+    ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0397', 'H'],
+    ['\u0399', 'I'], ['\u039A', 'K'], ['\u039C', 'M'], ['\u039D', 'N'],
+    ['\u039F', 'O'], ['\u03A1', 'P'], ['\u03A4', 'T'], ['\u03A5', 'Y'],
+    ['\u03A7', 'X'],
 
     // Mathematical symbols to ASCII (script style)
     ['\uD835\uDC82', 'a'], ['\uD835\uDC83', 'b'], ['\uD835\uDC84', 'c'], ['\uD835\uDC85', 'd'], ['\uD835\uDC86', 'e'],
