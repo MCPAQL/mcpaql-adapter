@@ -164,6 +164,11 @@ function splitAppleScriptList(output: string): string[] {
 /**
  * Build a JXA script that wraps an operation in JSON.stringify for reliable output.
  *
+ * This is a utility for external template authors building custom JXA scripts
+ * outside of the built-in template library. It is not used internally by the
+ * transport -- the predefined templates (e.g. APPLE_MAIL_TEMPLATES) include
+ * their own JSON.stringify calls inline.
+ *
  * @param application - The target application name
  * @param scriptBody - The JXA expression to evaluate (should return a value)
  * @returns A complete JXA script that outputs JSON to stdout

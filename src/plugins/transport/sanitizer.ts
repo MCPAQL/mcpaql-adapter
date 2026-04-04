@@ -186,7 +186,7 @@ function sanitizeBoolean(
   language: "AppleScript" | "JavaScript",
 ): string {
   if (typeof value === "boolean") {
-    return language === "JavaScript" ? String(value) : String(value);
+    return String(value);
   }
 
   if (value === "true" || value === 1) {
@@ -313,6 +313,11 @@ function sanitizeDate(
 
 /**
  * Format a Date for AppleScript's date literal syntax.
+ *
+ * WARNING: Uses local timezone via Date.getHours/getMinutes/etc. and relies
+ * on the macOS system locale for AppleScript date coercion. Results may vary
+ * across machines with different locale/timezone settings. For date parameters,
+ * JXA (`new Date(...)`) is the recommended path as it avoids locale ambiguity.
  */
 function sanitizeDateForAppleScript(date: Date): string {
   // AppleScript expects dates in the system locale format.

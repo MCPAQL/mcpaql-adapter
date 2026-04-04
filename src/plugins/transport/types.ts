@@ -102,24 +102,3 @@ export interface ScriptResult {
    */
   parsed?: unknown;
 }
-
-/**
- * A compiled operation definition for the native-applescript transport.
- * This is the `maps_to` value parsed into an executable form.
- */
-export interface NativeOperation {
-  /**
-   * The target application.
-   */
-  application: string;
-
-  /**
-   * The scripting language for this operation.
-   */
-  language: ScriptingLanguage;
-
-  /**
-   * The parameterized script template.
-   */
-  template: ScriptTemplate;
-}

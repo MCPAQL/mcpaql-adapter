@@ -29,7 +29,7 @@ import type {
   ScriptTemplate,
   ScriptingLanguage,
 } from "./types.js";
-import { interpolateTemplate, sanitizeParam } from "./sanitizer.js";
+import { SanitizationError, interpolateTemplate, sanitizeParam } from "./sanitizer.js";
 import { parseScriptOutput, wrapJxaForJsonOutput } from "./serializer.js";
 
 const execFileAsync = promisify(execFile);
@@ -72,6 +72,10 @@ export async function executeOsascript(
   language: ScriptingLanguage = "JavaScript",
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<ScriptResult> {
+  if (process.platform !== "darwin") {
+    throw new Error("native-applescript transport requires macOS (darwin)");
+  }
+
   const args = language === "JavaScript"
     ? ["-l", "JavaScript", "-e", script]
     : ["-e", script];
@@ -80,7 +84,11 @@ export async function executeOsascript(
     const { stdout, stderr } = await execFileAsync("/usr/bin/osascript", args, {
       timeout: timeoutMs,
       maxBuffer: MAX_OUTPUT_SIZE,
-      env: { ...process.env },
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        USER: process.env.USER,
+      },
     });
 
     const parsed = parseScriptOutput(stdout, language);
@@ -161,7 +169,23 @@ export async function executeOperation(
   options?: TransportSendOptions,
 ): Promise<NativeTransportResult> {
   const timeoutMs = options?.timeout ?? config.timeout ?? DEFAULT_TIMEOUT_MS;
-  const script = buildScript(template, params);
+
+  let script: string;
+  try {
+    script = buildScript(template, params);
+  } catch (error: unknown) {
+    if (error instanceof SanitizationError) {
+      return {
+        success: false,
+        error: {
+          code: "TRANSPORT_SANITIZATION_ERROR",
+          message: error.message,
+        },
+      };
+    }
+    throw error;
+  }
+
   const result = await executeOsascript(script, template.language, timeoutMs);
 
   if (!result.ok) {
