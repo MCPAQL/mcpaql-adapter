@@ -52,7 +52,7 @@ export class ContentValidator {
     { pattern: /forget\s+your\s+training/gi, severity: 'critical', description: 'Instruction override' },
     { pattern: /override\s+your\s+programming/gi, severity: 'critical', description: 'Instruction override' },
     { pattern: /you\s+are\s+now\s+(admin|root|system|sudo)/gi, severity: 'critical', description: 'Role elevation attempt' },
-    { pattern: /act\s+as\s+\w+/gi, weight: 7, severity: 'critical', description: 'Role assumption attempt' },
+    { pattern: /act\s+as\s+\w+/gi, severity: 'critical', description: 'Role assumption attempt' },
     { pattern: /pretend\s+(you\s+)?(have\s+no|are\s+not|don't\s+have)\s+(guidelines|restrictions|rules)/gi, severity: 'critical', description: 'Guideline removal attempt' },
     { pattern: /(you\s+are|you're)\s+now\s+in\s+(developer|debug|admin|test)\s+mode/gi, severity: 'critical', description: 'Mode elevation attempt' },
     { pattern: /jailbreak|DAN\s+mode|do\s+anything\s+now/gi, severity: 'critical', description: 'Known jailbreak pattern' },
