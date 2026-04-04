@@ -183,7 +183,7 @@ function sanitizeReal(name: string, value: unknown): string {
 function sanitizeBoolean(
   name: string,
   value: unknown,
-  language: "AppleScript" | "JavaScript",
+  _language: "AppleScript" | "JavaScript",
 ): string {
   if (typeof value === "boolean") {
     return String(value);
@@ -423,7 +423,11 @@ export function interpolateTemplate(
 ): string {
   return template.replace(/\{\{(\w+)\}\}/g, (match, paramName: string) => {
     if (!(paramName in sanitizedParams)) {
-      throw new Error(`Template references undefined parameter '${paramName}'.`);
+      throw new SanitizationError(
+        "SANITIZE_UNDEFINED_PARAM",
+        paramName,
+        `Template references undefined parameter '${paramName}'.`,
+      );
     }
     return sanitizedParams[paramName];
   });

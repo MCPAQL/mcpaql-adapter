@@ -132,3 +132,16 @@ test("wrapJxaForJsonOutput: escapes application name", () => {
   const script = wrapJxaForJsonOutput('My "App"', "return 1;");
   assert.match(script, /Application\("My \\"App\\""\)/);
 });
+
+// --- Known fragility documentation ---
+
+test("parseScriptOutput AppleScript: misparses comma-containing string as list", () => {
+  // AppleScript output "Hello, world" contains ", " which triggers the list
+  // heuristic in parseAppleScriptOutput. This documents the known fragility:
+  // a single string value with an interior comma is split into a list.
+  // JXA (JavaScript) should be preferred to avoid this ambiguity.
+  const result = parseScriptOutput("Hello, world", "AppleScript");
+  // This SHOULD be "Hello, world" as a single string, but the heuristic
+  // parses it as a two-element list:
+  assert.deepEqual(result, ["Hello", "world"]);
+});

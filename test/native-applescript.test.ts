@@ -14,8 +14,10 @@ import test from "node:test";
 import {
   buildScript,
   executeOsascript,
+  executeOperation,
   APPLE_MAIL_TEMPLATES,
 } from "../src/plugins/transport/native-applescript.js";
+import type { ScriptTemplate } from "../src/plugins/transport/types.js";
 
 const isMacOS = platform() === "darwin";
 
@@ -149,4 +151,30 @@ test("APPLE_MAIL_TEMPLATES.list_accounts: executes against Mail.app", {
     // Acceptable: Mail not running, no accounts configured, etc.
     assert.ok(result.stderr.length > 0, "Expected error message");
   }
+});
+
+// --- executeOperation error paths (cross-platform, no osascript needed) ---
+
+test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR when buildScript receives invalid params", async () => {
+  // list_mailboxes requires account_name as text; passing null triggers SanitizationError
+  const template = APPLE_MAIL_TEMPLATES.list_mailboxes;
+  const config = { application: "Mail" };
+  const result = await executeOperation(config, template, { account_name: null });
+  assert.equal(result.success, false);
+  assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
+  assert.match(result.error!.message, /account_name/);
+});
+
+test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR when interpolateTemplate has undefined param", async () => {
+  // Template references {{name}} but params only supply a different key
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "const x = {{name}};",
+    params: {}, // no declared params, so buildScript won't sanitize anything
+  };
+  const config = { application: "TestApp" };
+  const result = await executeOperation(config, template, {});
+  assert.equal(result.success, false);
+  assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
+  assert.match(result.error!.message, /name/);
 });

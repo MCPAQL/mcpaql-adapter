@@ -189,10 +189,13 @@ export async function executeOperation(
   const result = await executeOsascript(script, template.language, timeoutMs);
 
   if (!result.ok) {
+    const code = result.exitCode === -1
+      ? "TRANSPORT_NATIVE_TIMEOUT"
+      : "TRANSPORT_NATIVE_EXECUTION_ERROR";
     return {
       success: false,
       error: {
-        code: "TRANSPORT_NATIVE_EXECUTION_ERROR",
+        code,
         message: `AppleScript execution failed: ${result.stderr}`,
         stderr: result.stderr,
       },

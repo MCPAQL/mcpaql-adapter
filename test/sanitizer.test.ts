@@ -322,6 +322,13 @@ test("interpolateTemplate: throws on undefined parameter", () => {
   );
 });
 
+test("interpolateTemplate: throws SanitizationError for undefined parameter", () => {
+  assert.throws(
+    () => interpolateTemplate("{{missing}}", {}),
+    (error: unknown) => error instanceof SanitizationError && error.code === "SANITIZE_UNDEFINED_PARAM",
+  );
+});
+
 test("interpolateTemplate: handles no placeholders", () => {
   const result = interpolateTemplate("no params here", {});
   assert.equal(result, "no params here");
