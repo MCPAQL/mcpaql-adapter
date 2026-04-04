@@ -31,7 +31,7 @@ import type {
   ScriptingLanguage,
 } from "./types.js";
 import { SanitizationError, interpolateTemplate, sanitizeParam } from "./sanitizer.js";
-import { parseScriptOutput, wrapJxaForJsonOutput } from "./serializer.js";
+import { parseScriptOutput } from "./serializer.js";
 
 const execFileAsync = promisify(execFile);
 

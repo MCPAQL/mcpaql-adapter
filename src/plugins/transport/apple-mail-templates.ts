@@ -77,7 +77,7 @@ export const APPLE_MAIL_TEMPLATES: Record<string, ScriptTemplate> = {
     params: {
       account_name: "text",
       mailbox_name: "text",
-      limit: { type: "integer", optional: true },
+      limit: "integer",
     },
   },
 
@@ -144,7 +144,7 @@ export const APPLE_MAIL_TEMPLATES: Record<string, ScriptTemplate> = {
       account_name: "text",
       mailbox_name: "text",
       query: "text",
-      limit: { type: "integer", optional: true },
+      limit: "integer",
     },
   },
 
