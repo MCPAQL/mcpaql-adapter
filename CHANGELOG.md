@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `@mcpaql/security` package (`src/security/`) — standalone security infrastructure ported from DollhouseMCP
+  - `tool-classification.ts` — CLI tool risk assessment with 50+ dangerous patterns, risk scoring 0-100
+  - `content-validator.ts` — 45+ prompt injection patterns, HTML/XSS detection, YAML bomb detection
+  - `unicode-validator.ts` — 93+ homoglyph mappings (Cyrillic, Greek uppercase/lowercase, fullwidth, math), bidi overrides, zero-width character detection
+  - `input-normalizer.ts` — recursive Unicode NFC normalization with severity escalation
+  - `input-validator.ts` — control character removal, path traversal detection, shell metacharacter sanitization
+  - `pattern-matcher.ts` — glob-style pattern matching with DoS protection (500 char limit, LRU cache)
+  - `rate-limiter.ts` — token bucket rate limiting
+  - `approval-records.ts` — approval record lifecycle with TTL, LRU eviction, scope management
+  - 300 tests across 8 modules with zero external dependencies
 - Native AppleScript transport plugin (`src/plugins/transport/`)
   - `native-applescript.ts` - Transport plugin for macOS application automation via osascript
   - `sanitizer.ts` - Parameter sanitization and injection prevention (AppleScript equivalent of SQL parameterization)
