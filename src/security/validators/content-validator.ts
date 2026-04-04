@@ -87,6 +87,8 @@ export class ContentValidator {
     // Path traversal in content
     { pattern: /\.\.\/\.\.\/\.\.\//g, severity: 'high', description: 'Path traversal attempt' },
     { pattern: /\/etc\/passwd/gi, severity: 'high', description: 'Sensitive file access' },
+    { pattern: /\/etc\/shadow/gi, severity: 'high', description: 'Sensitive file access' },
+    { pattern: /\/etc\/sudoers/gi, severity: 'high', description: 'Sensitive file access' },
     { pattern: /\/\.ssh\//gi, severity: 'high', description: 'SSH key access attempt' },
 
     // HTML/XSS patterns

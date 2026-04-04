@@ -65,7 +65,12 @@ export function globToRegex(pattern: string): RegExp {
 }
 
 /**
- * Check if text matches a glob-like pattern
+ * Check if text matches a glob-like pattern.
+ *
+ * Uses a non-backtracking dynamic-programming algorithm when the
+ * pattern contains multiple `*` wildcards (which produce `.*` runs
+ * that cause catastrophic backtracking in regex engines).  Falls
+ * back to the cached regex path for simple patterns (0 or 1 star).
  *
  * @param text - The text to match against
  * @param pattern - Glob pattern with * and ? wildcards
@@ -79,8 +84,71 @@ export function matchesPattern(text: string, pattern: string): boolean {
     return false;
   }
 
+  if (pattern.length > MAX_GLOB_PATTERN_LENGTH) {
+    return false;
+  }
+
+  // Count stars — if multiple, use the DP matcher to avoid ReDoS
+  const starCount = countChar(pattern, '*');
+  if (starCount >= 2) {
+    return globMatchDP(text.toLowerCase(), pattern.toLowerCase());
+  }
+
   const regex = globToRegex(pattern);
   return regex.test(text);
+}
+
+/** Count occurrences of a character in a string */
+function countChar(s: string, ch: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ch) n++;
+  }
+  return n;
+}
+
+/**
+ * O(n*m) dynamic-programming glob matcher — immune to ReDoS.
+ *
+ * Supports `*` (match any sequence) and `?` (match single char).
+ * All other characters are matched literally (case already lowered by caller).
+ */
+function globMatchDP(text: string, pattern: string): boolean {
+  const n = text.length;
+  const m = pattern.length;
+
+  // dp[j] = true means pattern[0..j-1] matches text[0..i-1]
+  // We use a 1-D array and update in-place for each text character.
+  const dp = new Array<boolean>(m + 1).fill(false);
+  dp[0] = true;
+
+  // Initial pass: leading *'s match empty text
+  for (let j = 1; j <= m; j++) {
+    if (pattern[j - 1] === '*') {
+      dp[j] = dp[j - 1];
+    } else {
+      break;
+    }
+  }
+
+  for (let i = 1; i <= n; i++) {
+    const prev = dp.slice(); // dp values for text[0..i-2]
+    dp[0] = false; // empty pattern cannot match non-empty text
+
+    for (let j = 1; j <= m; j++) {
+      const pc = pattern[j - 1];
+      if (pc === '*') {
+        // * matches zero chars (prev[j]) or one more char (dp[j-1])
+        dp[j] = prev[j] || dp[j - 1];
+      } else if (pc === '?' || pc === text[i - 1]) {
+        dp[j] = prev[j - 1];
+      } else {
+        dp[j] = false;
+      }
+    }
+  }
+
+  return dp[m];
 }
 
 /**
