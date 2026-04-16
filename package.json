@@ -8,6 +8,21 @@
     "build": "tsc -p tsconfig.json",
     "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "mcp-aql",
+    "model-context-protocol",
+    "adapter",
+    "adapter-runtime",
+    "plugin-system",
+    "typescript",
+    "claude",
+    "cursor",
+    "vscode",
+    "codex",
+    "ai-tools"
+  ],
   "license": "SEE LICENSE IN LICENSE",
   "devDependencies": {
     "@types/node": "^24.3.0",
