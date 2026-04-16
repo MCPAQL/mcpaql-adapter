@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `examples/user-management-adapter.ts` - Full CRUDE adapter with all endpoints
 - Split licensing documentation (`LICENSING.md`, `LICENSE-DOCS`)
 - Updated README.md with repository purpose, document index, guides, ADRs, and examples
+- `keywords` array in `package.json` covering MCP protocol terms, adapter/runtime role, and supported MCP client applications (Claude, Cursor, VS Code, Codex) for improved npm and GitHub discovery
 
 ### Changed
 
