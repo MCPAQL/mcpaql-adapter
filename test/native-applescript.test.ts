@@ -13,6 +13,7 @@ import test from "node:test";
 
 import {
   buildScript,
+  describeExecutionFailure,
   executeOsascript,
   executeOperation,
   APPLE_MAIL_TEMPLATES,
@@ -250,4 +251,129 @@ test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR for non-string text
   assert.equal(result.success, false);
   assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
   assert.match(result.error!.message, /name/);
+});
+
+// --- describeExecutionFailure ---
+
+test("describeExecutionFailure: empty stderr never yields an empty or bare message", () => {
+  const detail = describeExecutionFailure(
+    { ok: false, stdout: "", stderr: "", exitCode: 1, elapsedMs: 123 },
+    30_000,
+  );
+  assert.equal(detail.code, "TRANSPORT_NATIVE_EXECUTION_ERROR");
+  assert.match(detail.message, /exited with code 1/);
+  assert.match(detail.message, /123ms/);
+  assert.match(detail.message, /stderr was empty/);
+  assert.equal(detail.stderr, undefined);
+  assert.equal(detail.exitCode, 1);
+  assert.equal(detail.timeoutMs, 30_000);
+});
+
+test("describeExecutionFailure: timeout maps to TRANSPORT_NATIVE_TIMEOUT and names the limit", () => {
+  const detail = describeExecutionFailure(
+    {
+      ok: false,
+      stdout: "",
+      stderr: "Script execution timed out after 30000ms.",
+      exitCode: -1,
+      elapsedMs: 30_012,
+      signal: "SIGTERM",
+      timedOut: true,
+    },
+    30_000,
+  );
+  assert.equal(detail.code, "TRANSPORT_NATIVE_TIMEOUT");
+  assert.match(detail.message, /timed out after 30012ms/);
+  assert.match(detail.message, /limit 30000ms/);
+  assert.equal(detail.signal, "SIGTERM");
+});
+
+test("describeExecutionFailure: signal termination is named when not a timeout", () => {
+  const detail = describeExecutionFailure(
+    { ok: false, stdout: "", stderr: "", exitCode: 1, elapsedMs: 50, signal: "SIGKILL" },
+    30_000,
+  );
+  assert.equal(detail.code, "TRANSPORT_NATIVE_EXECUTION_ERROR");
+  assert.match(detail.message, /terminated by SIGKILL/);
+});
+
+test("describeExecutionFailure: long stderr is truncated in the message but preserved in stderr", () => {
+  const longStderr = "x".repeat(2000);
+  const detail = describeExecutionFailure(
+    { ok: false, stdout: "", stderr: longStderr, exitCode: 1, elapsedMs: 10 },
+    30_000,
+  );
+  assert.ok(detail.message.length < 700, "message should be bounded");
+  assert.match(detail.message, /…/);
+  assert.equal(detail.stderr, longStderr);
+});
+
+test("describeExecutionFailure: stdout preview included when stderr is empty", () => {
+  const detail = describeExecutionFailure(
+    { ok: false, stdout: '{"partial": true}', stderr: "", exitCode: 1, elapsedMs: 10 },
+    30_000,
+  );
+  assert.match(detail.message, /stdout preview: \{"partial": true\}/);
+  assert.equal(detail.stdoutPreview, '{"partial": true}');
+});
+
+test("describeExecutionFailure: stdout preview omitted when stderr is present", () => {
+  const detail = describeExecutionFailure(
+    { ok: false, stdout: "noise", stderr: "real error", exitCode: 1, elapsedMs: 10 },
+    30_000,
+  );
+  assert.match(detail.message, /stderr: real error/);
+  assert.ok(!detail.message.includes("stdout preview"));
+});
+
+// --- error surfacing through executeOsascript / executeOperation (macOS only) ---
+
+test("executeOsascript: reports elapsedMs on success and failure", { skip: !isMacOS }, async () => {
+  const ok = await executeOsascript("JSON.stringify(1);", "JavaScript");
+  assert.equal(ok.ok, true);
+  assert.equal(typeof ok.elapsedMs, "number");
+  assert.ok(ok.elapsedMs >= 0);
+
+  const bad = await executeOsascript("not valid!!", "JavaScript");
+  assert.equal(bad.ok, false);
+  assert.equal(typeof bad.elapsedMs, "number");
+});
+
+test("executeOsascript: exit without stderr still yields structured fields", { skip: !isMacOS }, async () => {
+  // $.exit(3) terminates osascript with code 3 and no stderr at all —
+  // the exact shape that used to surface as an empty 'osascript failed:'.
+  const result = await executeOsascript("ObjC.import('stdlib'); $.exit(3);", "JavaScript");
+  assert.equal(result.ok, false);
+  assert.equal(result.exitCode, 3);
+  const detail = describeExecutionFailure(result, 30_000);
+  assert.match(detail.message, /exited with code 3/);
+  assert.match(detail.message, /stderr was empty/);
+});
+
+test("executeOperation: failed execution carries exit code, elapsed, and timeout in the error", { skip: !isMacOS }, async () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "throw new Error('boom');",
+    params: {},
+  };
+  const result = await executeOperation({ application: "Mail" }, template, {});
+  assert.equal(result.success, false);
+  assert.equal(result.error?.code, "TRANSPORT_NATIVE_EXECUTION_ERROR");
+  assert.ok(result.error!.message.length > 0);
+  assert.match(result.error!.message, /osascript/);
+  assert.equal(typeof result.error!.exitCode, "number");
+  assert.equal(typeof result.error!.elapsedMs, "number");
+  assert.equal(result.error!.timeoutMs, 30_000);
+});
+
+test("executeOperation: timeout carries TRANSPORT_NATIVE_TIMEOUT with the limit", { skip: !isMacOS }, async () => {
+  const template: ScriptTemplate = {
+    language: "JavaScript",
+    template: "delay(10); JSON.stringify(true);",
+    params: {},
+  };
+  const result = await executeOperation({ application: "Mail" }, template, {}, { timeout: 200 });
+  assert.equal(result.success, false);
+  assert.equal(result.error?.code, "TRANSPORT_NATIVE_TIMEOUT");
+  assert.match(result.error!.message, /limit 200ms/);
 });

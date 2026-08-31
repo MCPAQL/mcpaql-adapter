@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `serializer.ts` - AppleScript output to JSON serialization and JXA JSON wrapper
   - `types.ts` - Type definitions for script templates, configs, and results
   - Predefined JXA templates for Apple Mail operations
+  - `describeExecutionFailure()` — structured failure details for osascript errors (exit code, signal, elapsed time, timeout limit, stdout preview); `ScriptResult` now carries `elapsedMs`, `signal`, and `timedOut`
 - TypeScript project infrastructure (`package.json`, `tsconfig.json`)
 - 83 unit tests covering sanitization, serialization, template interpolation, injection prevention, and osascript execution
 - Initial architecture documentation migrated from spec repository
@@ -50,3 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standardized documentation dates to 2026-01-26
 - Expanded development guide prerequisites with dependency table and setup commands
 - Updated `COMMERCIAL-LICENSE-TERMS.md` with indemnification provisions, support/SLA clarifications, and renumbered downstream sections to stay aligned with the spec repository
+
+### Fixed
+
+- Non-zero osascript exit codes are now reported correctly: the transport read `error.status` (only set by sync child_process APIs) instead of `error.code`, so every non-zero exit surfaced as exit code 1
+- Native transport failures no longer surface as an empty message: `TRANSPORT_NATIVE_EXECUTION_ERROR` / `TRANSPORT_NATIVE_TIMEOUT` always name the exit code or signal and elapsed time, truncate oversized stderr, and include a stdout preview when stderr is empty (#32 section C; failure mode observed in adapter-generator#42)
+
