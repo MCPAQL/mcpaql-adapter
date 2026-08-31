@@ -118,6 +118,22 @@ export interface ScriptResult {
   exitCode: number;
 
   /**
+   * Wall-clock execution time in milliseconds.
+   */
+  elapsedMs: number;
+
+  /**
+   * The signal that terminated osascript, if any (e.g., "SIGTERM" when
+   * killed by the transport timeout). `null` when it exited on its own.
+   */
+  signal?: string | null;
+
+  /**
+   * Whether execution was killed by the transport timeout.
+   */
+  timedOut?: boolean;
+
+  /**
    * The parsed JSON output (when using JXA).
    * `undefined` when output is not valid JSON.
    */

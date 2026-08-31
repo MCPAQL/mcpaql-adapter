@@ -56,6 +56,94 @@ export interface NativeTransportResult {
     code: string;
     message: string;
     stderr?: string;
+    exitCode?: number;
+    signal?: string | null;
+    elapsedMs?: number;
+    timeoutMs?: number;
+    stdoutPreview?: string;
+  };
+}
+
+/**
+ * Structured description of a failed osascript execution.
+ * Produced by {@link describeExecutionFailure}; the `message` is guaranteed
+ * to be non-empty and self-contained even when osascript produced no stderr.
+ */
+export interface ExecutionErrorDetail {
+  code: "TRANSPORT_NATIVE_TIMEOUT" | "TRANSPORT_NATIVE_EXECUTION_ERROR";
+  message: string;
+  stderr?: string;
+  exitCode: number;
+  signal: string | null;
+  elapsedMs: number;
+  timeoutMs: number;
+  stdoutPreview?: string;
+}
+
+/**
+ * Maximum stderr length included in a failure message before truncation.
+ */
+const STDERR_MESSAGE_LIMIT = 500;
+
+/**
+ * Maximum stdout preview length included when stderr is empty.
+ */
+const STDOUT_PREVIEW_LIMIT = 200;
+
+/**
+ * Build a structured, never-empty error description from a failed script
+ * result. An empty `osascript failed:` message hides everything from the
+ * caller (adapter-generator#42); this always names the exit code or signal,
+ * the elapsed time, and — when stderr is empty — a preview of any stdout the
+ * script produced before dying.
+ *
+ * @param result - The failed script result (`ok: false`)
+ * @param timeoutMs - The timeout that governed the execution
+ * @returns Structured failure detail with a self-contained message
+ */
+export function describeExecutionFailure(
+  result: ScriptResult,
+  timeoutMs: number,
+): ExecutionErrorDetail {
+  const timedOut = result.timedOut === true;
+  const stderr = result.stderr.trim();
+  const stdoutTrimmed = result.stdout.trim();
+  const stdoutPreview = stdoutTrimmed === ""
+    ? undefined
+    : stdoutTrimmed.slice(0, STDOUT_PREVIEW_LIMIT);
+
+  const parts: string[] = [];
+  if (timedOut) {
+    parts.push(`osascript timed out after ${result.elapsedMs}ms (limit ${timeoutMs}ms)`);
+  } else if (result.signal) {
+    parts.push(`osascript was terminated by ${result.signal} after ${result.elapsedMs}ms`);
+  } else {
+    parts.push(`osascript exited with code ${result.exitCode} after ${result.elapsedMs}ms`);
+  }
+
+  if (!timedOut) {
+    if (stderr !== "") {
+      const truncated = stderr.length > STDERR_MESSAGE_LIMIT
+        ? `${stderr.slice(0, STDERR_MESSAGE_LIMIT)}…`
+        : stderr;
+      parts.push(`stderr: ${truncated}`);
+    } else {
+      parts.push("stderr was empty");
+    }
+  }
+  if ((timedOut || stderr === "") && stdoutPreview !== undefined) {
+    parts.push(`stdout preview: ${stdoutPreview}`);
+  }
+
+  return {
+    code: timedOut ? "TRANSPORT_NATIVE_TIMEOUT" : "TRANSPORT_NATIVE_EXECUTION_ERROR",
+    message: parts.join(". "),
+    stderr: stderr === "" ? undefined : stderr,
+    exitCode: result.exitCode,
+    signal: result.signal ?? null,
+    elapsedMs: result.elapsedMs,
+    timeoutMs,
+    stdoutPreview,
   };
 }
 
@@ -81,6 +169,8 @@ export async function executeOsascript(
     ? ["-l", "JavaScript", "-e", script]
     : ["-e", script];
 
+  const startedAt = Date.now();
+
   try {
     const { stdout, stderr } = await execFileAsync("/usr/bin/osascript", args, {
       timeout: timeoutMs,
@@ -99,11 +189,16 @@ export async function executeOsascript(
       stdout,
       stderr,
       exitCode: 0,
+      elapsedMs: Date.now() - startedAt,
+      signal: null,
       parsed,
     };
   } catch (error: unknown) {
     const execError = error as {
-      code?: string;
+      // execFile sets `code` to the numeric exit code on non-zero exit
+      // (or a string like "ENOENT" on spawn failure); `status` is only
+      // populated by the sync APIs.
+      code?: string | number;
       killed?: boolean;
       signal?: string;
       stdout?: string;
@@ -117,14 +212,36 @@ export async function executeOsascript(
         stdout: execError.stdout ?? "",
         stderr: `Script execution timed out after ${timeoutMs}ms.`,
         exitCode: -1,
+        elapsedMs: Date.now() - startedAt,
+        signal: execError.signal ?? "SIGTERM",
+        timedOut: true,
       };
+    }
+
+    // Execution-layer failures (e.g. ERR_CHILD_PROCESS_STDIO_MAXBUFFER when
+    // stdout exceeds maxBuffer) reject with a STRING error.code, an EMPTY
+    // stderr string, and the real cause in error.message — fold both into
+    // stderr so the failure stays diagnosable instead of collapsing into
+    // "exit code 1, stderr was empty".
+    const stringCode = typeof execError.code === "string" ? execError.code : undefined;
+    let stderrText = execError.stderr ?? "";
+    if (stderrText.trim() === "" && stringCode !== undefined) {
+      // Only for string-coded failures: a plain non-zero exit with silent
+      // stderr keeps stderr empty (error.message would just repeat the
+      // command line), and describeExecutionFailure reports it as such.
+      const cause = error instanceof Error ? error.message : String(error);
+      stderrText = `${stringCode}: ${cause}`;
     }
 
     return {
       ok: false,
       stdout: execError.stdout ?? "",
-      stderr: execError.stderr ?? (error instanceof Error ? error.message : String(error)),
-      exitCode: execError.status ?? 1,
+      stderr: stderrText,
+      exitCode: typeof execError.code === "number"
+        ? execError.code
+        : execError.status ?? 1,
+      elapsedMs: Date.now() - startedAt,
+      signal: execError.signal ?? null,
     };
   }
 }
@@ -206,15 +323,18 @@ export async function executeOperation(
     const result = await executeOsascript(script, template.language, timeoutMs);
 
     if (!result.ok) {
-      const code = result.exitCode === -1
-        ? "TRANSPORT_NATIVE_TIMEOUT"
-        : "TRANSPORT_NATIVE_EXECUTION_ERROR";
+      const detail = describeExecutionFailure(result, timeoutMs);
       return {
         success: false,
         error: {
-          code,
-          message: `AppleScript execution failed: ${result.stderr}`,
-          stderr: result.stderr,
+          code: detail.code,
+          message: detail.message,
+          stderr: detail.stderr,
+          exitCode: detail.exitCode,
+          signal: detail.signal,
+          elapsedMs: detail.elapsedMs,
+          timeoutMs: detail.timeoutMs,
+          stdoutPreview: detail.stdoutPreview,
         },
       };
     }
