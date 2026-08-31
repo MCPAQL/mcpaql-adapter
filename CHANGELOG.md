@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `types.ts` - Type definitions for script templates, configs, and results
   - Predefined JXA templates for Apple Mail operations
   - `describeExecutionFailure()` — structured failure details for osascript errors (exit code, signal, elapsed time, timeout limit, stdout preview); `ScriptResult` now carries `elapsedMs`, `signal`, and `timedOut`
+  - `recent_messages` template — newest-first date-bounded listing (adapter-generator#27)
+  - `search_messages` gains a `field` parameter: `subject` (default), `sender`, or `any`
+  - Bounded-scan paging for `list_messages`, `recent_messages`, `search_messages`: `cursor`, `scan_cap`, `time_budget_ms` parameters and a `{messages, count, scanned, cursor, complete, truncated, elapsed_ms}` envelope (#32 section A)
+  - `ScriptParamDef.default` — declared parameter defaults, sanitized like supplied values
 - TypeScript project infrastructure (`package.json`, `tsconfig.json`)
 - 83 unit tests covering sanitization, serialization, template interpolation, injection prevention, and osascript execution
 - Initial architecture documentation migrated from spec repository
@@ -48,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Apple Mail scan templates (`list_messages`, `search_messages`) return the paging envelope instead of a bare array, iterate by index with one `properties()` Apple Event per message, and never call `messages()`, `messages.length`, or non-id `whose` — the enumeration paths that timed out on 100k-message mailboxes (#26, #32 section A). Enforced by a template-source test.
+- **Breaking:** `list_mailboxes` no longer reports `message_count` (it required `messages.length` per mailbox, which fails for accounts containing one large mailbox); `unread_count` remains
 - Standardized documentation dates to 2026-01-26
 - Expanded development guide prerequisites with dependency table and setup commands
 - Updated `COMMERCIAL-LICENSE-TERMS.md` with indemnification provisions, support/SLA clarifications, and renumbered downstream sections to stay aligned with the spec repository

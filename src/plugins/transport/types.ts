@@ -52,6 +52,13 @@ export interface ScriptParamDef {
    * @default false
    */
   optional?: boolean;
+
+  /**
+   * Value used when the parameter is not supplied by the caller.
+   * A defaulted parameter never triggers a missing-parameter error; the
+   * default value passes through sanitization exactly like a supplied one.
+   */
+  default?: unknown;
 }
 
 /**

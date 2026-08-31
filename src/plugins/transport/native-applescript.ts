@@ -252,11 +252,15 @@ export async function executeOsascript(
  */
 function resolveParamDef(
   entry: AppleScriptParamType | ScriptParamDef,
-): { type: AppleScriptParamType; optional: boolean } {
+): { type: AppleScriptParamType; optional: boolean; defaultValue?: unknown } {
   if (typeof entry === "string") {
     return { type: entry, optional: false };
   }
-  return { type: entry.type, optional: entry.optional === true };
+  return {
+    type: entry.type,
+    optional: entry.optional === true,
+    defaultValue: entry.default,
+  };
 }
 
 /**
@@ -276,11 +280,14 @@ export function buildScript(
   const optionalNames = new Set<string>();
 
   for (const [name, entry] of Object.entries(template.params)) {
-    const { type: expectedType, optional } = resolveParamDef(entry);
+    const { type: expectedType, optional, defaultValue } = resolveParamDef(entry);
     if (optional) {
       optionalNames.add(name);
     }
-    const value = params[name];
+    let value = params[name];
+    if (value === undefined && defaultValue !== undefined) {
+      value = defaultValue;
+    }
     if (value === undefined) {
       if (!optional) {
         throw new SanitizationError(
