@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `rate-limiter.ts` — token bucket rate limiting
   - `approval-records.ts` — approval record lifecycle with TTL, LRU eviction, scope management
   - 300 tests across 8 modules with zero external dependencies
+- Apple Mail metadata cache (`src/plugins/cache/`) — issue #32 section B1
+  - `mail-cache.ts` — SQLite-backed message METADATA cache (never bodies) via the `node:sqlite` built-in; parameterized query surface with mandatory capped limits (capability parity with the bridge operations), deny-by-default account/mailbox scoping, per-query audit log; no Full Disk Access anywhere — populated only through the Automation-permitted bridge
+  - `mail-sync.ts` — resumable budgeted `backfillStep` (with `maxDepth` for jumbo mailboxes) and `incrementalSync` (newest-first, stops at the first cached message), driven by the bounded scan templates
+  - graceful degradation: `isMailCacheSupported()` gates on `node:sqlite` availability (Node >= 22.5 flagged, unflagged from 23.4); callers fall back to bounded bridge scans
 - Native AppleScript transport plugin (`src/plugins/transport/`)
   - `native-applescript.ts` - Transport plugin for macOS application automation via osascript
   - `sanitizer.ts` - Parameter sanitization and injection prevention (AppleScript equivalent of SQL parameterization)
@@ -53,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** Apple Mail scan templates (`list_messages`, `search_messages`) return the paging envelope instead of a bare array, iterate by index with one `properties()` Apple Event per message, and never call `messages()`, `messages.length`, or non-id `whose` — the enumeration paths that timed out on 100k-message mailboxes (#26, #32 section A). Enforced by a template-source test.
 - **Breaking:** `list_mailboxes` no longer reports `message_count` (it required `messages.length` per mailbox, which fails for accounts containing one large mailbox); `unread_count` remains
+- CI test job runs on Node 24 (was 22) so the `node:sqlite`-backed cache tests execute unflagged
 - Standardized documentation dates to 2026-01-26
 - Expanded development guide prerequisites with dependency table and setup commands
 - Updated `COMMERCIAL-LICENSE-TERMS.md` with indemnification provisions, support/SLA clarifications, and renumbered downstream sections to stay aligned with the spec repository
