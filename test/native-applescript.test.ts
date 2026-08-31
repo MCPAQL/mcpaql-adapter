@@ -377,6 +377,8 @@ test("executeOperation: timeout carries TRANSPORT_NATIVE_TIMEOUT with the limit"
   assert.equal(result.success, false);
   assert.equal(result.error?.code, "TRANSPORT_NATIVE_TIMEOUT");
   assert.match(result.error!.message, /limit 200ms/);
+});
+
 // --- bridge rules enforcement (issue #32 section A) ---
 
 test("APPLE_MAIL_TEMPLATES: no template enumerates a mailbox", () => {
@@ -398,6 +400,20 @@ test("APPLE_MAIL_TEMPLATES: no template enumerates a mailbox", () => {
         `Template '${name}' may only use whose() for id lookup, found: ${following}`,
       );
     }
+  }
+});
+
+test("APPLE_MAIL_TEMPLATES: scan loops only complete on out-of-range, other errors propagate", () => {
+  for (const name of ["list_messages", "recent_messages", "search_messages"]) {
+    const src = APPLE_MAIL_TEMPLATES[name].template;
+    assert.ok(
+      src.includes("e.errorNumber === -1719"),
+      `Template '${name}' must detect end-of-mailbox via errorNumber -1719`,
+    );
+    assert.ok(
+      src.includes("throw e;"),
+      `Template '${name}' must rethrow non-end-of-mailbox errors`,
+    );
   }
 });
 
