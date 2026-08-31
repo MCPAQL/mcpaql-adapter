@@ -218,10 +218,25 @@ export async function executeOsascript(
       };
     }
 
+    // Execution-layer failures (e.g. ERR_CHILD_PROCESS_STDIO_MAXBUFFER when
+    // stdout exceeds maxBuffer) reject with a STRING error.code, an EMPTY
+    // stderr string, and the real cause in error.message — fold both into
+    // stderr so the failure stays diagnosable instead of collapsing into
+    // "exit code 1, stderr was empty".
+    const stringCode = typeof execError.code === "string" ? execError.code : undefined;
+    let stderrText = execError.stderr ?? "";
+    if (stderrText.trim() === "" && stringCode !== undefined) {
+      // Only for string-coded failures: a plain non-zero exit with silent
+      // stderr keeps stderr empty (error.message would just repeat the
+      // command line), and describeExecutionFailure reports it as such.
+      const cause = error instanceof Error ? error.message : String(error);
+      stderrText = `${stringCode}: ${cause}`;
+    }
+
     return {
       ok: false,
       stdout: execError.stdout ?? "",
-      stderr: execError.stderr ?? (error instanceof Error ? error.message : String(error)),
+      stderr: stderrText,
       exitCode: typeof execError.code === "number"
         ? execError.code
         : execError.status ?? 1,
