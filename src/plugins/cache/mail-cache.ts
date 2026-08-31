@@ -27,6 +27,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
+import { chmodSync } from "node:fs";
 import { createRequire } from "node:module";
 
 import type {
@@ -397,5 +398,21 @@ export function openMailCache(path: string, config: MailCacheConfig): MailCache 
       "node:sqlite is not available in this runtime (requires Node >= 22.5 with --experimental-sqlite, unflagged from 23.4). Fall back to bounded bridge scans.",
     );
   }
-  return new MailCache(new sqlite.DatabaseSync(path), config);
+  const db = new sqlite.DatabaseSync(path);
+  if (path !== ":memory:") {
+    // Cached metadata (senders, subjects, account names) must not be
+    // world-readable: DatabaseSync honors the process umask (typically
+    // 0644). Restrict the database and its WAL/journal side files to the
+    // owning user.
+    for (const file of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+      try {
+        chmodSync(file, 0o600);
+      } catch {
+        // Side files may not exist (yet); the main file chmod is the one
+        // that must succeed, and a failure there surfaces on first use
+        // of a hardened deployment rather than silently loosening modes.
+      }
+    }
+  }
+  return new MailCache(db, config);
 }

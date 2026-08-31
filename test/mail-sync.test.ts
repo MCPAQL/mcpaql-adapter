@@ -131,12 +131,57 @@ test("incrementalSync: empty delta is cheap and keeps state", { skip: !supported
   cache.close();
 });
 
-test("incrementalSync: budget stop on a huge delta leaves complete=false", { skip: !supported }, async () => {
+test("incrementalSync: budget stop keeps the old boundary; a later pass fills the hole", { skip: !supported }, async () => {
   const cache = openMailCache(":memory:", config);
   await backfillStep(cache, "Work", "INBOX", fakeMailbox([5, 4, 3]).fetcher, { maxMessages: 100 });
   const flood = [...Array.from({ length: 50 }, (_, i) => 500 - i), 5, 4, 3];
-  const report = await incrementalSync(cache, "Work", "INBOX", fakeMailbox(flood, 10).fetcher, { maxMessages: 20 });
-  assert.equal(report.complete, false);
-  assert.ok(report.fetched >= 20);
+
+  const interrupted = await incrementalSync(cache, "Work", "INBOX", fakeMailbox(flood, 10).fetcher, { maxMessages: 20 });
+  assert.equal(interrupted.complete, false);
+  assert.ok(interrupted.fetched >= 20);
+  assert.equal(
+    cache.getSyncState("Work", "INBOX")!.newestId,
+    5,
+    "an interrupted pass must NOT advance the boundary",
+  );
+
+  // Regression (#37 Codex P1): the second pass must walk past the messages
+  // the interrupted pass already cached and fetch the REMAINDER of the
+  // delta, not stop at the first cached id and orphan the middle.
+  const finishing = await incrementalSync(cache, "Work", "INBOX", fakeMailbox(flood, 10).fetcher, { maxMessages: 100 });
+  assert.equal(finishing.complete, true);
+  assert.equal(cache.countMessages("Work", "INBOX"), 53, "all 50 delta messages plus the 3 originals");
+  assert.equal(cache.getSyncState("Work", "INBOX")!.newestId, 500, "boundary advances only on completion");
+  cache.close();
+});
+
+test("backfillStep: a page crossing maxDepth is clamped to the depth limit", { skip: !supported }, async () => {
+  const cache = openMailCache(":memory:", config);
+  const ids = Array.from({ length: 100 }, (_, i) => 1000 - i);
+  // Page size 15 with maxDepth 20: second page would overshoot to 30
+  // without clamping (#37 Codex P2). The fake ignores maxCount, so this
+  // also exercises the defensive slice.
+  const { fetcher } = fakeMailbox(ids, 15);
+  const report = await backfillStep(cache, "Work", "INBOX", fetcher, { maxMessages: 100, maxDepth: 20 });
+  assert.equal(report.complete, true);
+  assert.equal(cache.countMessages("Work", "INBOX"), 20, "never stores past maxDepth");
+  cache.close();
+});
+
+test("makeBridgePageFetcher-style fetchers receive maxCount for the final page", { skip: !supported }, async () => {
+  const cache = openMailCache(":memory:", config);
+  const ids = Array.from({ length: 40 }, (_, i) => 200 - i);
+  const seen: Array<number | undefined> = [];
+  const inner = fakeMailbox(ids, 15);
+  const fetcher = async (cursor: number, maxCount?: number) => {
+    seen.push(maxCount);
+    const page = await inner.fetcher(cursor);
+    return maxCount !== undefined && page.messages.length > maxCount
+      ? { ...page, messages: page.messages.slice(0, maxCount), cursor: cursor + maxCount, complete: false }
+      : page;
+  };
+  await backfillStep(cache, "Work", "INBOX", fetcher, { maxMessages: 100, maxDepth: 20 });
+  assert.deepEqual(seen, [20, 5], "remaining depth is passed down so the bridge fetches only what is needed");
+  assert.equal(cache.countMessages("Work", "INBOX"), 20);
   cache.close();
 });

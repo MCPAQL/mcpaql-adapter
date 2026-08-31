@@ -58,13 +58,14 @@ export function makeBridgePageFetcher(
   mailbox: string,
   pageSize = 15,
 ): BridgePageFetcher {
-  return async (cursor: number): Promise<BridgeScanPage> => {
+  return async (cursor: number, maxCount?: number): Promise<BridgeScanPage> => {
+    const limit = maxCount !== undefined ? Math.min(pageSize, maxCount) : pageSize;
     const result = await executeOperation(config, APPLE_MAIL_TEMPLATES.list_messages, {
       account_name: account,
       mailbox_name: mailbox,
-      limit: pageSize,
+      limit,
       cursor,
-      scan_cap: pageSize,
+      scan_cap: limit,
     });
     if (!result.success) {
       throw new Error(
@@ -121,20 +122,26 @@ export async function backfillStep(
       complete = true; // depth limit reached — treat as done for this mailbox
       break;
     }
-    const page = await fetchPage(cursor);
+    const remainingDepth = budget.maxDepth !== undefined ? budget.maxDepth - cursor : undefined;
+    const page = await fetchPage(cursor, remainingDepth);
     pages++;
-    fetched += page.messages.length;
-    stored += cache.upsertMessages(account, mailbox, page.messages);
-    if (newestId === null && page.messages.length > 0 && cursor === 0) {
-      newestId = page.messages[0].id;
+    // Defensive clamp for fetchers that ignore maxCount: never store past
+    // the configured depth limit.
+    const messages = remainingDepth !== undefined && page.messages.length > remainingDepth
+      ? page.messages.slice(0, remainingDepth)
+      : page.messages;
+    fetched += messages.length;
+    stored += cache.upsertMessages(account, mailbox, messages);
+    if (newestId === null && messages.length > 0 && cursor === 0) {
+      newestId = messages[0].id;
     }
     if (page.complete || page.cursor === null) {
       complete = true;
       cursor = page.cursor ?? cursor;
       break;
     }
-    cursor = page.cursor;
-    if (page.messages.length === 0) {
+    cursor = Math.min(page.cursor, cursor + messages.length);
+    if (messages.length === 0) {
       break; // defensive: no progress, avoid a hot loop
     }
   }
@@ -168,30 +175,33 @@ export async function incrementalSync(
   let stored = 0;
   let pages = 0;
   let complete = false;
-  let newestId = knownNewestId;
+  let candidateNewestId: number | null = null;
 
+  // The stop boundary is ONLY the recorded newest id. Messages that happen
+  // to be cached already (e.g. stored by a budget-interrupted previous
+  // incremental pass) are refreshed and walked PAST, not treated as the
+  // boundary — otherwise a budget stop would permanently skip the
+  // unfetched remainder of a large delta. newestId advances only when the
+  // pass reaches the boundary (or the end of the mailbox), so an
+  // interrupted pass resumes with the old boundary intact.
   outer: while (!budgetExhausted(effectiveBudget, fetched)) {
     const page = await fetchPage(cursor);
     pages++;
     const fresh: CachedMessage[] = [];
     for (const message of page.messages) {
-      const known = message.id === knownNewestId
-        || cache.hasMessage(account, mailbox, message.id);
-      if (known) {
-        stored += cache.upsertMessages(account, mailbox, fresh);
-        fetched += fresh.length;
-        if (fresh.length > 0 && cursor === 0 && newestId !== fresh[0].id) {
-          newestId = fresh[0].id;
-        }
+      if (message.id === knownNewestId) {
         complete = true;
-        break outer;
+        break;
       }
       fresh.push(message);
     }
     stored += cache.upsertMessages(account, mailbox, fresh);
     fetched += fresh.length;
-    if (cursor === 0 && fresh.length > 0) {
-      newestId = fresh[0].id;
+    if (cursor === 0 && page.messages.length > 0) {
+      candidateNewestId = page.messages[0].id;
+    }
+    if (complete) {
+      break outer;
     }
     if (page.complete || page.cursor === null) {
       complete = true;
@@ -205,7 +215,7 @@ export async function incrementalSync(
 
   cache.setSyncState(account, mailbox, {
     backfillCursor: state?.backfillCursor ?? null,
-    newestId,
+    newestId: complete && candidateNewestId !== null ? candidateNewestId : knownNewestId,
     lastSyncAt: new Date().toISOString(),
   });
   return { fetched, stored, pages, complete, cursor: null };

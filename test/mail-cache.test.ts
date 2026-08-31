@@ -191,3 +191,20 @@ test("bodies are structurally impossible: schema has no content column", { skip:
   assert.ok(!("content" in result.messages[0]), "no content field in results");
   cache.close();
 });
+
+test("openMailCache: on-disk database is restricted to the owning user (0600)", { skip: !supported }, async () => {
+  const { mkdtempSync, statSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "mail-cache-test-"));
+  const path = join(dir, "cache.db");
+  const cache = openMailCache(path, scoped);
+  try {
+    cache.upsertMessages("Work", "INBOX", [msg(1)]);
+    const mode = statSync(path).mode & 0o777;
+    assert.equal(mode, 0o600, `cache db mode must be 0600, got 0${mode.toString(8)}`);
+  } finally {
+    cache.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -90,7 +90,8 @@ export interface BridgeScanPage {
 
 /**
  * Fetch one page of newest-first message metadata starting at `cursor`.
- * Implementations wrap the bounded list_messages template; tests supply
- * fakes.
+ * `maxCount`, when given, caps how many messages the page may contain
+ * (used to respect a backfill depth limit exactly). Implementations wrap
+ * the bounded list_messages template; tests supply fakes.
  */
-export type BridgePageFetcher = (cursor: number) => Promise<BridgeScanPage>;
+export type BridgePageFetcher = (cursor: number, maxCount?: number) => Promise<BridgeScanPage>;
