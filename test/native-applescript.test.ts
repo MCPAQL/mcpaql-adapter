@@ -81,6 +81,7 @@ test("buildScript: handles all APPLE_MAIL_TEMPLATES without errors", () => {
     list_messages: { account_name: "test", mailbox_name: "INBOX", limit: 10 },
     get_message: { account_name: "test", mailbox_name: "INBOX", message_id: 1 },
     search_messages: { account_name: "test", mailbox_name: "INBOX", query: "hello", limit: 10 },
+    recent_messages: { account_name: "test", mailbox_name: "INBOX", days: 7, limit: 10 },
     mark_read: { account_name: "test", mailbox_name: "INBOX", message_id: 1, read_status: true },
     mark_flagged: { account_name: "test", mailbox_name: "INBOX", message_id: 1, flagged_status: true },
     delete_message: { account_name: "test", mailbox_name: "INBOX", message_id: 1 },
@@ -250,4 +251,82 @@ test("executeOperation: returns TRANSPORT_SANITIZATION_ERROR for non-string text
   assert.equal(result.success, false);
   assert.equal(result.error?.code, "TRANSPORT_SANITIZATION_ERROR");
   assert.match(result.error!.message, /name/);
+});
+
+// --- bridge rules enforcement (issue #32 section A) ---
+
+test("APPLE_MAIL_TEMPLATES: no template enumerates a mailbox", () => {
+  for (const [name, template] of Object.entries(APPLE_MAIL_TEMPLATES)) {
+    const src = template.template;
+    assert.ok(
+      !/\bmessages\(\)/.test(src),
+      `Template '${name}' must not call messages() — it enumerates the entire mailbox`,
+    );
+    assert.ok(
+      !/messages\.length/.test(src),
+      `Template '${name}' must not read messages.length — it enumerates the entire mailbox`,
+    );
+    for (const match of src.matchAll(/\.whose\(/g)) {
+      const following = src.slice(match.index!, match.index! + 20);
+      assert.match(
+        following,
+        /\.whose\(\{id:/,
+        `Template '${name}' may only use whose() for id lookup, found: ${following}`,
+      );
+    }
+  }
+});
+
+test("APPLE_MAIL_TEMPLATES: scan templates return the paging envelope", () => {
+  for (const name of ["list_messages", "recent_messages", "search_messages"]) {
+    const src = APPLE_MAIL_TEMPLATES[name].template;
+    for (const key of ["cursor: done ? null : index", "complete: done", "truncated:", "scanned:", "elapsed_ms:"]) {
+      assert.ok(src.includes(key), `Template '${name}' envelope missing '${key}'`);
+    }
+  }
+});
+
+// --- parameter defaults ---
+
+test("buildScript: applies declared defaults for scan parameters", () => {
+  const template = APPLE_MAIL_TEMPLATES.list_messages;
+  const script = buildScript(template, {
+    account_name: "Google",
+    mailbox_name: "INBOX",
+    limit: 10,
+  });
+  assert.match(script, /const cursor = 0;/);
+  assert.match(script, /const scanCap = 200;/);
+  assert.match(script, /const timeBudgetMs = 20000;/);
+  assert.ok(!script.includes("{{"), "no unresolved placeholders");
+});
+
+test("buildScript: supplied values override declared defaults", () => {
+  const template = APPLE_MAIL_TEMPLATES.list_messages;
+  const script = buildScript(template, {
+    account_name: "Google",
+    mailbox_name: "INBOX",
+    limit: 10,
+    cursor: 250,
+    scan_cap: 50,
+  });
+  assert.match(script, /const cursor = 250;/);
+  assert.match(script, /const scanCap = 50;/);
+});
+
+test("buildScript: defaulted text param is sanitized like a supplied one", () => {
+  const template = APPLE_MAIL_TEMPLATES.search_messages;
+  const script = buildScript(template, {
+    account_name: "Google",
+    mailbox_name: "INBOX",
+    query: "hello",
+    limit: 5,
+  });
+  assert.match(script, /const field = "subject";/);
+});
+
+test("APPLE_MAIL_TEMPLATES.list_mailboxes: no longer reports message_count", () => {
+  const src = APPLE_MAIL_TEMPLATES.list_mailboxes.template;
+  assert.ok(!src.includes("message_count"), "message_count requires messages.length");
+  assert.ok(src.includes("unread_count"), "unread_count is cheap and stays");
 });
