@@ -264,6 +264,51 @@ test("no growth despite a loading placeholder stops after three tries, never spi
   assert.equal(page.calls.filter((c) => c === "SCROLL").length, 3);
 });
 
+test("after a navigation, a channel whose rows have not rendered yet is polled, not reported as a problem", async () => {
+  // Observed live: the route changes and the list mounts before the rows do, so the
+  // first extraction says "not in view". A channel that was already open gets no grace.
+  let clock = 0;
+  const now = (): number => clock;
+  const sleep = async (ms: number): Promise<void> => { clock += ms; };
+  let mounted = false;
+  let extractions = 0;
+  const evaluate = async (expr: string): Promise<unknown> => {
+    if (expr.includes("history.pushState")) { mounted = true; return true; }
+    if (expr === "EXTRACT") {
+      extractions++;
+      return extractions < 3 ? windowOf([], `Channel ${CH} is not in view. Open it in Discord and retry.`) : windowOf(history.slice(100));
+    }
+    if (expr.includes("chat-messages-")) return mounted; // mounted probe: false until navigated
+    throw new Error(`unexpected ${expr.slice(0, 40)}`);
+  };
+  const r = await readMessages({ evaluate, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10 });
+  assert.equal(r.stop_reason, "filled");
+  assert.equal(r.count, 10);
+  assert.equal(extractions, 3, "two settle polls, then rows");
+
+  // Rows that never arrive within the grace period are still a named problem, bounded by the clock.
+  clock = 0; extractions = 0; mounted = false;
+  const never = async (expr: string): Promise<unknown> => {
+    if (expr.includes("history.pushState")) { mounted = true; return true; }
+    if (expr === "EXTRACT") { extractions++; return windowOf([], `Channel ${CH} is not in view. Open it in Discord and retry.`); }
+    if (expr.includes("chat-messages-")) return mounted;
+    throw new Error(`unexpected ${expr.slice(0, 40)}`);
+  };
+  const r2 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10 });
+  assert.equal(r2.stop_reason, "problem");
+  assert.match(r2.problem ?? "", /not in view/);
+  assert.ok(extractions >= 2 && extractions <= 14, `bounded polling, got ${extractions}`);
+  assert.ok(clock <= 3500, `grace period is bounded, clock at ${clock}`);
+
+  // A budget that runs out while the channel is still rendering is a budget stop, not a "problem".
+  clock = 0; extractions = 0; mounted = false;
+  const r3 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 1000 });
+  assert.equal(r3.stop_reason, "time_budget");
+  assert.equal(r3.complete, false);
+  assert.match(r3.problem ?? "", /not in view/, "the last observation still travels with the result");
+  assert.ok(clock >= 1000 && clock <= 1300, `slept out the budget, clock at ${clock}`);
+});
+
 test("an extractor problem with no messages surfaces as a problem", async () => {
   const evaluate = async (expr: string): Promise<unknown> => {
     if (expr === "EXTRACT") return windowOf([], "More than one message list is mounted");
