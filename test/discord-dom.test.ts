@@ -258,7 +258,8 @@ test("extractor source is self-contained and runs verbatim in a bare context", (
   assert.deepEqual([...helpers], [], "only the shimmed __name helper may appear");
   const direct = extractMessages(fixture(), DISCORD_SELECTORS, { maxMessages: 10 });
   const viaPage = vm.runInNewContext(expr, { document: fixture() });
-  assert.deepEqual(viaPage, direct);
+  // The sandbox realm has its own Object prototype; compare by value.
+  assert.deepEqual(JSON.parse(JSON.stringify(viaPage)), JSON.parse(JSON.stringify(direct)));
 });
 
 test("every selector in the table is used by the extractor", () => {
