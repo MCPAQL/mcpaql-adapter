@@ -67,7 +67,7 @@ function fakePage(history: DiscordMessage[], initial: number, perScroll: number)
       const r: ScrollStepOutcome = { before, after: mounted, moreAbove: mounted < history.length, problem: null };
       return r;
     }
-    if (expr.includes("location.assign")) return true;
+    if (expr.includes("pushState")) return true;
     if (expr.includes("chat-messages-")) return true; // mounted probe
     throw new Error(`unexpected expression ${expr.slice(0, 40)}`);
   };
@@ -133,7 +133,7 @@ test("before returns only older messages and jumps to the cursor when opening", 
   assert.equal(r.messages[0].content, "m59");
   assert.equal(r.messages[9].content, "m50");
   assert.ok(r.messages.every((m) => olderThan(m.id, before)));
-  const nav = page.calls.find((c) => c.includes("location.assign"));
+  const nav = page.calls.find((c) => c.includes("pushState"));
   assert.ok(nav?.includes(`/channels/${G}/${CH}/${before}`), "navigation jumps to the cursor message");
 });
 

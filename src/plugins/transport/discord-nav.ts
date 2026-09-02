@@ -7,12 +7,15 @@
  *
  * Same discipline as discord-dom.ts: the in-page functions use only the
  * narrow `DomRoot`/`DomNode` surface, are unit-tested against the fake DOM,
- * and ship to the browser as their own source text. Their one shared helper,
- * `plainText`, is inlined ahead of them by the expression builder. Every
- * selector lives in {@link DISCORD_NAV_SELECTORS}.
+ * and ship to the browser as their own source text with the shared
+ * `renderText` helper inlined ahead of them. Every selector lives in
+ * {@link DISCORD_NAV_SELECTORS}.
  *
- * Navigation is same-origin by construction: `openChannel` only ever
- * assigns a path built from validated snowflake ids, never a caller URL.
+ * Navigation is a same-document route change (`history.pushState` plus a
+ * `popstate` event, which Discord's router handles) to a path built only
+ * from validated snowflake ids, never a caller URL. It does not reload the
+ * client, so drafts and voice connections survive, exactly as a sidebar
+ * click does.
  *
  * The only side effect anywhere in this module is the one clicking has:
  * opening a channel marks it read in Discord.
@@ -20,7 +23,10 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-import type { DomNode, DomRoot } from "./discord-dom.js";
+import { DISCORD_SELECTORS, buildPageExpression, renderText, type DomNode, type DomRoot } from "./discord-dom.js";
+
+/** Discord ids are numeric snowflakes. One definition, used in Node and in the page. */
+export const SNOWFLAKE_PATTERN = "^\\d{15,22}$";
 
 /** Selectors observed on discord.com, verified 2026-09-02. */
 export const DISCORD_NAV_SELECTORS = {
@@ -33,25 +39,31 @@ export const DISCORD_NAV_SELECTORS = {
   dmList: '[data-list-id^="private-channels"]',
   dmItem: 'li[role="listitem"]',
   dmLink: 'a[href^="/channels/@me/"]',
-  dmName: '[class*="name"]',
+  /** The name node itself (`name_<hash>`), not the `nameAndDecorators_<hash>` wrapper that also holds bot tags. */
+  dmName: '[class*="name_"]',
   dmUnread: '[class*="numberBadge"], [class*="unread"]',
+  /** The sidebar region that holds the open server's channel entries and its header. */
+  channelNav: "nav",
   /** Channel sidebar entries; channels are links, categories are expandable headers. */
   channelEntry: '[data-list-item-id^="channels___"]',
   channelLink: "a[href]",
   /** Server name shown in the channel sidebar header. */
   guildHeader: "header h1",
-  /** The mounted message list, used to detect that a channel has opened. */
-  messageList: 'ol[data-list-id="chat-messages"]',
+  /** The mounted message list, shared with the extractor. */
+  messageList: DISCORD_SELECTORS.messageList,
   /** Markers (not selectors). */
+  messageRowPrefix: DISCORD_SELECTORS.messageRowPrefix,
   guildIdPrefix: "guildsnav___",
   guildHomeId: "guildsnav___home",
   channelIdPrefix: "channels___",
   dmHrefPrefix: "/channels/@me/",
+  snowflake: SNOWFLAKE_PATTERN,
   /**
    * Unread-status prefixes Discord prepends to the hidden guild label,
    * observed live: "Unread messages, X", "1 mention, X", "23 mentions, X".
+   * A pattern source (compiled in the page) so the table stays JSON.
    */
-  guildLabelPrefix: /^(?:unread(?: messages?| mentions?)?|\d+ (?:unread )?(?:mentions?|messages?)),\s*/i,
+  guildLabelPrefix: "^(?:unread(?: messages?| mentions?)?|\\d+ (?:unread )?(?:mentions?|messages?)),\\s*",
 } as const;
 
 export type DiscordNavSelectors = typeof DISCORD_NAV_SELECTORS;
@@ -105,25 +117,9 @@ export function resolveListOptions(opts: { limit?: number } = {}): ResolvedListO
   return { limit: Math.max(1, Math.floor(opts.limit ?? DEFAULT_LIST_LIMIT)) };
 }
 
-/** Discord ids are numeric snowflakes. Anything else never reaches a selector or a URL. */
+/** Anything that is not a snowflake never reaches a selector or a URL. */
 export function isSnowflake(value: unknown): value is string {
-  return typeof value === "string" && /^\d{15,22}$/.test(value);
-}
-
-/**
- * Plain text of a node with non-breaking spaces normalized. Shared by the
- * in-page functions; `buildListExpression` inlines its source ahead of them,
- * so it must be self-contained too.
- */
-export function plainText(n: DomNode | null): string {
-  if (!n) return "";
-  const parts: string[] = [];
-  const walk = (x: DomNode): void => {
-    if (x.nodeType === 3) parts.push(x.nodeValue ?? "");
-    else if (x.nodeType === 1) for (let i = 0; i < x.childNodes.length; i++) walk(x.childNodes[i]);
-  };
-  walk(n);
-  return parts.join("").replace(/[\u00a0\u2007\u202f]/g, " ").trim();
+  return typeof value === "string" && new RegExp(SNOWFLAKE_PATTERN).test(value);
 }
 
 /**
@@ -131,6 +127,8 @@ export function plainText(n: DomNode | null): string {
  * SELF-CONTAINED: shipped to the browser via `Function.prototype.toString`.
  */
 export function listDms(root: DomRoot, sel: DiscordNavSelectors, opts: ResolvedListOptions): ListResult<DiscordDm> {
+  const snowflake = new RegExp(sel.snowflake);
+  const renderTextOf = (value: string | null): string => (value ?? "").replace(/[\u00a0\u2007\u202f]/g, " ");
   const list = root.querySelector(sel.dmList);
   if (!list) {
     return { items: [], count: 0, truncated: false, problem: "No DM sidebar found. Open Discord's Direct Messages view and retry." };
@@ -143,16 +141,18 @@ export function listDms(root: DomRoot, sel: DiscordNavSelectors, opts: ResolvedL
     if (!link) continue; // Friends, Nitro, Shop, message requests: not conversations.
     const href = link.getAttribute("href") ?? "";
     const id = href.slice(sel.dmHrefPrefix.length).split(/[/?#]/)[0];
-    if (!/^\d{15,22}$/.test(id)) continue;
+    if (!snowflake.test(id)) continue;
     if (items.length >= opts.limit) {
       truncated = true;
       break;
     }
-    const label = link.getAttribute("aria-label") ?? "";
-    const m = /\(([^)]*)\)\s*(?:,\s*(.*))?$/.exec(label);
+    // Label shape: "<name> (<kind>)[, <status>]". Only the LAST parenthesized
+    // group is the kind, so names like "Alice (she/her)" survive.
+    const label = renderTextOf(link.getAttribute("aria-label"));
+    const m = /\(([^()]*)\)(?:,\s*([^()]*))?$/.exec(label);
     items.push({
       id,
-      name: plainText(row.querySelector(sel.dmName)) || label.replace(/\s*\(.*$/, "").trim(),
+      name: renderText(row.querySelector(sel.dmName), null).trim() || (m ? label.slice(0, m.index).trim() : label.trim()),
       kind: m ? m[1].trim() : null,
       status: m && m[2] ? m[2].trim() : null,
       unread: row.querySelector(sel.dmUnread) !== null,
@@ -166,6 +166,8 @@ export function listDms(root: DomRoot, sel: DiscordNavSelectors, opts: ResolvedL
  * SELF-CONTAINED: shipped to the browser via `Function.prototype.toString`.
  */
 export function listGuilds(root: DomRoot, sel: DiscordNavSelectors, opts: ResolvedListOptions): ListResult<DiscordGuild> {
+  const snowflake = new RegExp(sel.snowflake);
+  const prefix = new RegExp(sel.guildLabelPrefix, "i");
   const rail = root.querySelector(sel.guildRail);
   if (!rail) {
     return { items: [], count: 0, truncated: false, problem: "No server rail found. Is Discord fully loaded?" };
@@ -176,13 +178,13 @@ export function listGuilds(root: DomRoot, sel: DiscordNavSelectors, opts: Resolv
     const itemId = node.getAttribute("data-list-item-id") ?? "";
     if (itemId === sel.guildHomeId) continue;
     const id = itemId.slice(sel.guildIdPrefix.length);
-    if (!/^\d{15,22}$/.test(id)) continue; // folders and other non-server rail entries
+    if (!snowflake.test(id)) continue; // folders and other non-server rail entries
     if (items.length >= opts.limit) {
       truncated = true;
       break;
     }
-    const raw = plainText(node.querySelector(sel.guildLabel));
-    const name = raw.replace(sel.guildLabelPrefix, "").trim();
+    const raw = renderText(node.querySelector(sel.guildLabel), null).trim();
+    const name = raw.replace(prefix, "").trim();
     items.push({ id, name: name || raw, raw_label: raw });
   }
   return { items, count: items.length, truncated, problem: null };
@@ -193,15 +195,22 @@ export function listGuilds(root: DomRoot, sel: DiscordNavSelectors, opts: Resolv
  * SELF-CONTAINED: shipped to the browser via `Function.prototype.toString`.
  */
 export function listChannels(root: DomRoot, sel: DiscordNavSelectors, opts: ResolvedListOptions): ListChannelsResult {
-  const entries = Array.from(root.querySelectorAll(sel.channelEntry));
-  const guildName = plainText(root.querySelector(sel.guildHeader)) || null;
-  if (entries.length === 0) {
+  const snowflake = new RegExp(sel.snowflake);
+  // Scope everything to the one sidebar region that holds channel entries, so
+  // a DM view's header or a second mounted list can never bleed in.
+  const navs = Array.from(root.querySelectorAll(sel.channelNav)).filter((n) => n.querySelector(sel.channelEntry) !== null);
+  if (navs.length !== 1) {
     return {
-      guild: { id: null, name: guildName },
+      guild: { id: null, name: null },
       items: [], count: 0, truncated: false,
-      problem: "No channel sidebar found. Open a server in Discord and retry.",
+      problem: navs.length === 0
+        ? "No channel sidebar found. Open a server in Discord and retry."
+        : "More than one channel sidebar is mounted; cannot tell which server is open.",
     };
   }
+  const nav = navs[0];
+  const entries = Array.from(nav.querySelectorAll(sel.channelEntry));
+  const guildName = renderText(nav.querySelector(sel.guildHeader), null).trim() || null;
   const items: DiscordChannel[] = [];
   let guildId: string | null = null;
   let category: string | null = null;
@@ -221,7 +230,7 @@ export function listChannels(root: DomRoot, sel: DiscordNavSelectors, opts: Reso
     const segments = href.split(/[?#]/)[0].split("/");
     const channelId = segments[segments.length - 1];
     const gId = segments[segments.length - 2];
-    if (!/^\d{15,22}$/.test(channelId) || !/^\d{15,22}$/.test(gId)) continue;
+    if (!snowflake.test(channelId) || !snowflake.test(gId)) continue;
     guildId = guildId ?? gId;
     if (items.length >= opts.limit) {
       truncated = true;
@@ -232,23 +241,13 @@ export function listChannels(root: DomRoot, sel: DiscordNavSelectors, opts: Reso
   return { guild: { id: guildId, name: guildName }, items, count: items.length, truncated, problem: null };
 }
 
-/**
- * Build the expression the transport evaluates for one of the listing
- * functions. Same `__name` shim rule as discord-dom.ts.
- */
+/** Build the expression the transport evaluates for one of the listing functions. */
 export function buildListExpression(
   fn: "listDms" | "listGuilds" | "listChannels",
   opts: { limit?: number } = {},
   selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS,
 ): string {
-  const helper = plainText.toString();
-  const source = { listDms, listGuilds, listChannels }[fn].toString();
-  const shim = /\b__name\(/.test(source + helper) ? "const __name = (fn) => fn; " : "";
-  // RegExp values do not survive JSON.stringify; serialize them as source.
-  const sel = Object.entries(selectors)
-    .map(([k, v]) => `${JSON.stringify(k)}: ${v instanceof RegExp ? v.toString() : JSON.stringify(v)}`)
-    .join(", ");
-  return `(() => { ${shim}const plainText = ${helper}; return (${source})(document, { ${sel} }, ${JSON.stringify(resolveListOptions(opts))}); })()`;
+  return buildPageExpression({ listDms, listGuilds, listChannels }[fn], [selectors, resolveListOptions(opts)], [renderText]);
 }
 
 // --- Navigation (Node side) ---
@@ -307,14 +306,21 @@ export function channelPath(target: OpenChannelTarget): string {
 export function mountedExpression(channelId: string, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
   if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
   return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
-    `if (l.querySelector('li[id^="chat-messages-${channelId}-"]') !== null) return true; ` +
+    `if (l.querySelector('li[id^="${selectors.messageRowPrefix}${channelId}-"]') !== null) return true; ` +
     `return /^\\/channels\\/(?:@me|\\d+)\\/${channelId}(?:\\/|$)/.test(location.pathname); })()`;
 }
 
-/** Expression that navigates to a same-origin path. Only `channelPath` output is ever passed. */
+/**
+ * Expression that changes the client's route to a same-origin path without
+ * reloading it: a history push followed by the `popstate` event Discord's
+ * router listens for (verified live 2026-09-02). Only `channelPath` output
+ * is ever passed; the shape is re-checked here as defense in depth.
+ */
 export function navigateExpression(path: string): string {
-  if (!/^\/channels\/(?:@me|\d{15,22})\/\d{15,22}(?:\/\d{15,22})?$/.test(path)) throw new Error("navigation path must come from channelPath()");
-  return `(() => { location.assign(${JSON.stringify(path)}); return true; })()`;
+  const id = SNOWFLAKE_PATTERN.slice(1, -1);
+  if (!new RegExp(`^/channels/(?:@me|${id})/${id}(?:/${id})?$`).test(path)) throw new Error("navigation path must come from channelPath()");
+  return `(() => { history.pushState({}, "", ${JSON.stringify(path)}); ` +
+    `dispatchEvent(new PopStateEvent("popstate", { state: {} })); return true; })()`;
 }
 
 /**
@@ -335,28 +341,58 @@ export async function openChannel(
   const started = Date.now();
   const mounted = mountedExpression(target.channelId);
 
-  // Every evaluate is bounded by what remains of the total budget, so a hung
-  // page cannot stretch the op past `timeoutMs`.
-  const remaining = (): number => Math.max(200, timeoutMs - (Date.now() - started));
+  // Every evaluate and every sleep is bounded by what actually remains of the
+  // total budget, so a hung page cannot stretch the op past `timeoutMs`, and
+  // nothing (including the mark-as-read navigation) starts once it is spent.
+  const remaining = (): number => timeoutMs - (Date.now() - started);
+  const budgeted = <T>(run: (timeoutMs: number) => Promise<T>): Promise<T> => {
+    const left = remaining();
+    if (left <= 0) throw new OpenChannelTimeout(target.channelId, timeoutMs, path);
+    return run(left);
+  };
+  // With an anchor, always navigate: the mounted check cannot tell where the window is.
   const wantsAnchor = target.messageId !== undefined && target.messageId !== null;
-  if (!wantsAnchor && (await evaluate(mounted, { timeoutMs: remaining() })) === true) {
+  if (!wantsAnchor && (await budgeted((t) => evaluate(mounted, { timeoutMs: t }))) === true) {
     return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
   }
   try {
-    await evaluate(navigateExpression(path), { timeoutMs: remaining() });
-  } catch {
-    // Same-document navigation can destroy the execution context before the
-    // evaluate returns; the mount poll below decides whether it worked.
+    await budgeted((t) => evaluate(navigateExpression(path), { timeoutMs: t }));
+  } catch (err) {
+    // A route change does not normally replace the execution context, but a
+    // client that does reload would; only that is expected. Anything else (disconnected,
+    // origin refused, protocol error, timeout) is the transport's named
+    // failure and must reach the caller.
+    if (!isContextReplaced(err)) throw err;
   }
-  while (Date.now() - started < timeoutMs) {
-    await sleep(pollMs);
+  while (remaining() > 0) {
+    await sleep(Math.min(pollMs, Math.max(0, remaining())));
+    if (remaining() <= 0) break;
     let ok = false;
     try {
-      ok = (await evaluate(mounted, { timeoutMs: remaining() })) === true;
-    } catch {
+      ok = (await budgeted((t) => evaluate(mounted, { timeoutMs: t }))) === true;
+    } catch (err) {
+      if (!isContextReplaced(err)) throw err;
       ok = false; // context still being replaced; keep polling
     }
     if (ok) return { channelId: target.channelId, path, alreadyOpen: false, elapsedMs: Date.now() - started };
   }
-  throw new Error(`Channel ${target.channelId} did not open within ${timeoutMs}ms (path ${path}). Check that the user can see it.`);
+  throw new OpenChannelTimeout(target.channelId, timeoutMs, path);
+}
+
+/** The channel did not mount within the budget. */
+export class OpenChannelTimeout extends Error {
+  constructor(readonly channelId: string, readonly timeoutMs: number, readonly path: string) {
+    super(`Channel ${channelId} did not open within ${timeoutMs}ms (path ${path}). Check that the user can see it.`);
+    this.name = "OpenChannelTimeout";
+  }
+}
+
+/**
+ * True for the one failure navigation is expected to cause: the page's
+ * execution context being torn down and replaced. Matched on the DevTools
+ * wording, which the transport passes through in its message.
+ */
+export function isContextReplaced(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /execution context (was )?destroyed|cannot find context|context.*(navigat|replaced)|inspected target navigated/i.test(message);
 }

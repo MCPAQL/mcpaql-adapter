@@ -13,6 +13,7 @@ import {
   DISCORD_NAV_SELECTORS,
   buildListExpression,
   channelPath,
+  isContextReplaced,
   isSnowflake,
   listChannels,
   listDms,
@@ -41,11 +42,11 @@ function documentShaped(root: FakeNode): DomRoot {
 
 // --- Fixtures ---
 
-function dmRow(href: string | null, label: string, name: string, unread = false, itemId = "x"): FakeNode {
+function dmRow(href: string | null, label: string, name: string, unread = false, itemId = "x", bot = false): FakeNode {
   const inner = href
     ? el("a", { class: "link_c8ddc0", href, "data-list-item-id": `private-channels-uid_11___${itemId}`, "aria-label": label },
         el("div", { class: "layout_c8ddc0" }, el("div", { class: "content_c8ddc0" },
-          el("div", { class: "nameAndDecorators_c8ddc0" }, el("div", { class: "name_c8ddc0 text-md/medium" }, name)),
+          el("div", { class: "nameAndDecorators_c8ddc0" }, el("div", { class: "name_c8ddc0 text-md/medium" }, name), ...(bot ? [el("span", { class: "botTag_c8ddc0" }, "APP")] : [])),
           ...(unread ? [el("div", { class: "numberBadge_c8ddc0" }, "2")] : []),
         )))
     : el("div", { class: "interactive_c8ddc0 linkButton_c8ddc0" }, el("div", { class: "name_c8ddc0" }, name));
@@ -58,7 +59,8 @@ function dmSidebar(): FakeNode {
     dmRow(null, "", "Nitro"),
     dmRow(`/channels/@me/${DM1}`, "Nate Aune (direct message), Online", "Nate Aune", false, DM1),
     dmRow(`/channels/@me/${DM2}`, "Alice, Bob (group message)", "Alice, Bob", true, DM2),
-    dmRow(`/channels/@me/${DM3}`, "Carl-bot (direct message)", "Carl-bot", false, DM3),
+    dmRow(`/channels/@me/${DM3}`, "Carl-bot (direct message)", "Carl-bot", false, DM3, true),
+    dmRow("/channels/@me/1520443442982031489", "Alice (she/her), Bob (group message), Online", "Alice (she/her), Bob", false, "1520443442982031489"),
     dmRow("/channels/@me/not-a-snowflake", "Broken (direct message)", "Broken", false, "z"),
   );
 }
@@ -115,10 +117,11 @@ function page(...parts: FakeNode[]): FakeNode {
 test("listDms returns only real conversations with ids, names, kind, status, unread", () => {
   const r = listDms(page(dmSidebar()), SEL, OPTS);
   assert.equal(r.problem, null);
-  assert.equal(r.count, 3);
+  assert.equal(r.count, 4);
   assert.deepEqual(r.items[0], { id: DM1, name: "Nate Aune", kind: "direct message", status: "Online", unread: false });
   assert.deepEqual(r.items[1], { id: DM2, name: "Alice, Bob", kind: "group message", status: null, unread: true });
-  assert.equal(r.items[2].id, DM3);
+  assert.equal(r.items[2].name, "Carl-bot", "the bot tag decorator is not part of the name");
+  assert.deepEqual(r.items[3], { id: "1520443442982031489", name: "Alice (she/her), Bob", kind: "group message", status: "Online", unread: false });
   assert.equal(r.truncated, false);
 });
 
@@ -164,9 +167,16 @@ test("listChannels returns channels with kind and enclosing category, plus the g
   assert.equal(r.items[2].href, `/channels/${G}/${C2}`);
 });
 
-test("listChannels without a sidebar is a problem", () => {
-  const r = listChannels(page(guildRail()), SEL, OPTS);
+test("listChannels without a sidebar is a problem and never reports another view's header as the server", () => {
+  const dmView = el("nav", { "aria-label": "Direct messages sidebar" }, el("header", {}, el("h1", {}, "Friends")));
+  const r = listChannels(page(guildRail(), dmView), SEL, OPTS);
   assert.match(r.problem ?? "", /No channel sidebar/);
+  assert.deepEqual(r.guild, { id: null, name: null });
+});
+
+test("listChannels with two channel sidebars is a problem rather than a blend", () => {
+  const r = listChannels(page(channelSidebar(), channelSidebar()), SEL, OPTS);
+  assert.match(r.problem ?? "", /More than one channel sidebar/);
 });
 
 // --- Expression builders: self-contained, run bare, regex selector survives ---
@@ -192,7 +202,7 @@ test("each listing expression runs verbatim in a bare context and equals the dir
 test("every selector-valued table entry parses in the fake DOM grammar", () => {
   const probe = el("div", {});
   for (const [key, value] of Object.entries(SEL)) {
-    if (typeof value !== "string" || /Prefix$|Id$/.test(key)) continue;
+    if (/Prefix$|Id$|^snowflake$/.test(key)) continue; // markers and patterns, not selectors
     assert.doesNotThrow(() => probe.querySelectorAll(value), `selector ${key} = ${value}`);
   }
 });
@@ -213,10 +223,13 @@ test("channelPath builds only same-origin paths from validated ids", () => {
   assert.throws(() => channelPath({ guildId: "../x", channelId: C1 }), /snowflake/);
 });
 
-test("navigateExpression refuses anything that did not come from channelPath", () => {
+test("navigateExpression is a route change, not a reload, and refuses anything not from channelPath", () => {
   assert.throws(() => navigateExpression("https://evil.example/"), /channelPath/);
   assert.throws(() => navigateExpression("/channels/@me/1/../../x"), /channelPath/);
-  assert.match(navigateExpression(`/channels/@me/${DM1}`), /location\.assign\("\/channels\/@me\/\d+"\)/);
+  const expr = navigateExpression(`/channels/@me/${DM1}`);
+  assert.match(expr, /history\.pushState\(\{\}, "", "\/channels\/@me\/\d+"\)/);
+  assert.match(expr, /new PopStateEvent\("popstate"/);
+  assert.doesNotMatch(expr, /location\.(assign|href|replace)/, "a reload would drop drafts and voice");
 });
 
 test("mountedExpression is true for a row of the channel or an empty list at the channel's location", () => {
@@ -235,12 +248,51 @@ test("mountedExpression is true for a row of the channel or an empty list at the
   assert.equal(run([], `/channels/${G}/${C1}0`), false, "prefix of another id is not");
 });
 
-test("openChannel bounds every evaluate by the remaining budget", async () => {
+test("openChannel bounds every evaluate and sleep by the actual remaining budget", async () => {
   const budgets: number[] = [];
+  const sleeps: number[] = [];
   const evaluate = async (_e: string, o?: { timeoutMs?: number }): Promise<unknown> => { budgets.push(o?.timeoutMs ?? -1); return false; };
-  await assert.rejects(openChannel(evaluate, { channelId: DM1 }, { sleep: noSleep, timeoutMs: 50, pollMs: 0 }), /did not open/);
+  await assert.rejects(openChannel(evaluate, { channelId: DM1 }, { sleep: async (ms) => { sleeps.push(ms); }, timeoutMs: 50, pollMs: 250 }), /did not open/);
   assert.ok(budgets.length >= 2);
-  assert.ok(budgets.every((b) => b >= 200 && b <= 50 + 200), `budgets ${budgets.join(",")}`);
+  assert.ok(budgets.every((b) => b > 0 && b <= 50), `budgets ${budgets.join(",")}`);
+  assert.ok(sleeps.every((s) => s <= 50), `sleeps ${sleeps.join(",")}`);
+});
+
+test("openChannel does not navigate once the budget is spent by the initial probe", async () => {
+  const calls: string[] = [];
+  const evaluate = async (e: string): Promise<unknown> => { calls.push(e); await new Promise((r) => setTimeout(r, 30)); return false; };
+  await assert.rejects(openChannel(evaluate, { channelId: DM1 }, { sleep: noSleep, timeoutMs: 20, pollMs: 0 }), /did not open/);
+  assert.ok(!calls.some((c) => c.includes("pushState")), "mark-as-read navigation must not start after the deadline");
+});
+
+test("openChannel tolerates only the context-destroyed navigation error and propagates the rest", async () => {
+  class TransportError extends Error { constructor(readonly code: string, message: string) { super(message); } }
+  let navigated = false;
+  const tolerated = fakeEvaluate(() => (expr) => {
+    if (expr.includes("pushState")) { navigated = true; return new Error("Page script threw: Execution context was destroyed."); }
+    return navigated;
+  });
+  const r = await openChannel(tolerated.evaluate, { guildId: G, channelId: C1 }, { sleep: noSleep, timeoutMs: 1000, pollMs: 0 });
+  assert.equal(r.alreadyOpen, false);
+
+  const disconnected = fakeEvaluate(() => (expr) => expr.includes("pushState") ? new TransportError("TRANSPORT_CDP_DISCONNECTED", "WebSocket closed by the browser") : false);
+  await assert.rejects(openChannel(disconnected.evaluate, { channelId: DM1 }, { sleep: noSleep, timeoutMs: 1000 }), (e: unknown) => (e as TransportError).code === "TRANSPORT_CDP_DISCONNECTED");
+
+  let polls = 0;
+  const refusedLater = fakeEvaluate(() => (expr) => {
+    if (expr.includes("pushState")) return true;
+    polls++;
+    return polls > 1 ? new TransportError("TRANSPORT_CDP_ORIGIN_REFUSED", "Attached tab left https://discord.com") : false;
+  });
+  await assert.rejects(openChannel(refusedLater.evaluate, { channelId: DM1 }, { sleep: noSleep, timeoutMs: 1000, pollMs: 0 }), (e: unknown) => (e as TransportError).code === "TRANSPORT_CDP_ORIGIN_REFUSED");
+});
+
+test("isContextReplaced matches DevTools wording only", () => {
+  assert.equal(isContextReplaced(new Error("Page script threw: Execution context was destroyed.")), true);
+  assert.equal(isContextReplaced(new Error("Cannot find context with specified id")), true);
+  assert.equal(isContextReplaced(new Error("Inspected target navigated or closed")), true);
+  assert.equal(isContextReplaced(new Error("WebSocket closed by the browser")), false);
+  assert.equal(isContextReplaced(new Error("evaluate timed out after 100ms.")), false);
 });
 
 function fakeEvaluate(script: (calls: string[]) => (expr: string) => unknown) {
@@ -262,20 +314,20 @@ test("openChannel short-circuits when the channel is already mounted", async () 
   const r = await openChannel(evaluate, { channelId: DM1 }, { sleep: noSleep });
   assert.equal(r.alreadyOpen, true);
   assert.equal(calls.length, 1);
-  assert.ok(!calls.some((c) => c.includes("location.assign")));
+  assert.ok(!calls.some((c) => c.includes("pushState")));
 });
 
 test("openChannel navigates, tolerates the context being destroyed, and polls until mounted", async () => {
   let polls = 0;
   const { calls, evaluate } = fakeEvaluate(() => (expr) => {
-    if (expr.includes("location.assign")) return new Error("Execution context was destroyed");
+    if (expr.includes("pushState")) return new Error("Execution context was destroyed");
     polls++;
     return polls >= 3; // first probe false, then two failed polls, then mounted
   });
   const r = await openChannel(evaluate, { guildId: G, channelId: C2 }, { sleep: noSleep, timeoutMs: 5000 });
   assert.equal(r.alreadyOpen, false);
   assert.equal(r.path, `/channels/${G}/${C2}`);
-  assert.equal(calls.filter((c) => c.includes("location.assign")).length, 1);
+  assert.equal(calls.filter((c) => c.includes("pushState")).length, 1);
 });
 
 test("openChannel fails with a named error when the channel never mounts", async () => {
