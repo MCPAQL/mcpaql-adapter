@@ -23,7 +23,6 @@ import type { CallToolRequest, CallToolResult, ListToolsResult } from "@modelcon
 import {
   DISCORD_OPERATIONS,
   DISCORD_TOOL_NAME,
-  buildIntrospection,
   resolveOperationArguments,
   runDiscordOperation,
   type DiscordOperationDeps,
@@ -68,6 +67,7 @@ export function createQueue(): <T>(task: () => Promise<T>) => Promise<T> {
 
 export function createDiscordServer(options: DiscordServerOptions): Server {
   const server = new Server({ name: DISCORD_ADAPTER_NAME, version: options.version }, { capabilities: { tools: {} } });
+  const deps: DiscordOperationDeps = { ...options.deps, version: options.version };
   const queue = createQueue();
 
   server.setRequestHandler(ListToolsRequestSchema, async (): Promise<ListToolsResult> => ({
@@ -97,8 +97,9 @@ export function createDiscordServer(options: DiscordServerOptions): Server {
         error: { code: "NOT_FOUND_OPERATION", message: `Tool '${toolName}' is not served; every Discord operation is a read on ${DISCORD_TOOL_NAME}.`, details: { tool: toolName } },
       });
     }
-    if (operation === "introspect") return textResult(buildIntrospection(params, options.version));
-    return textResult(await queue(() => runDiscordOperation(options.deps, operation, params)));
+    // introspect never touches the page, so it is answered outside the queue.
+    if (operation === "introspect") return textResult(await runDiscordOperation(deps, operation, params));
+    return textResult(await queue(() => runDiscordOperation(deps, operation, params)));
   });
 
   return server;

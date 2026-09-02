@@ -63,8 +63,8 @@ test("introspect answers through the tool with the server's version", async () =
   try {
     const result = envelope(await c.client.callTool({ name: DISCORD_TOOL_NAME, arguments: { operation: "introspect", params: { query: "operations" } } }));
     assert.equal(result.success, true);
-    const data = (result as { data: { _protocol: { version: string }; operations: Array<{ name: string }> } }).data;
-    assert.equal(data._protocol.version, "9.9.9");
+    const data = (result as { data: { adapter: { version: string }; operations: Array<{ name: string }> } }).data;
+    assert.equal(data.adapter.version, "9.9.9");
     assert.ok(data.operations.some((o) => o.name === "read_messages"));
   } finally {
     await c.close();

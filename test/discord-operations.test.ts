@@ -21,16 +21,16 @@ import {
   buildIntrospection,
   errorEnvelope,
   findOperation,
+  guardEvaluate,
   resolveOperationArguments,
   runDiscordOperation,
+  scanExpression,
   validateParams,
   type DiscordOperation,
   type OperationFailure,
 } from "../src/plugins/transport/discord-operations.js";
 import { FORBIDDEN_PRIMITIVES, GATED_PRIMITIVES, type DeclaredEffect } from "../src/plugins/transport/discord-scripts.js";
-
-const CH = "1520443442982031486";
-const G = "1210290974601773056";
+import { CH, G, msg } from "./helpers/discord-fixtures.js";
 
 function op(name: string): DiscordOperation {
   const found = findOperation(name);
@@ -53,25 +53,6 @@ function failure(result: unknown): OperationFailure["error"] {
   const r = result as OperationFailure;
   assert.equal(r.success, false, `expected a failure envelope, got ${JSON.stringify(result)}`);
   return r.error;
-}
-
-function msg(n: number): DiscordMessage {
-  return {
-    id: String(1_544_000_000_000_000_000n + BigInt(n)),
-    channel_id: CH,
-    author: "Alice",
-    author_inherited: false,
-    author_ref: null,
-    timestamp: null,
-    content: `m${n}`,
-    reply_to: null,
-    reply_label: null,
-    reactions: [],
-    attachments: [],
-    embeds: [],
-    links: [],
-    edited: false,
-  };
 }
 
 /**
@@ -230,7 +211,31 @@ test("a channel that never mounts is NOT_FOUND_RESOURCE with the channel named, 
   assert.equal(error.code, "NOT_FOUND_RESOURCE");
   assert.deepEqual(error.details?.resource_id, CH);
   assert.equal(error.details?.resource_type, "channel");
-  assert.match(error.message, /did not open/);
+  assert.equal(error.details?.reason, "timeout");
+  assert.match(error.message, /did not open within 1000ms/);
+  assert.match(error.message, /raise time_budget_ms/);
+});
+
+test("introspect runs through runDiscordOperation too, with the adapter version from deps", async () => {
+  const result = await runDiscordOperation({ evaluate: async () => null, version: "3.2.1" }, "introspect", { query: "operations" });
+  assert.equal(result.success, true);
+  assert.equal((result as { data: { adapter: { version: string } } }).data.adapter.version, "3.2.1");
+  assert.equal(failure(await runDiscordOperation({ evaluate: async () => null }, "introspect", {})).code, "VALIDATION_INVALID_TYPE");
+});
+
+test("the runtime guard refuses an expression that is not read-only for the operation, before it reaches the page", async () => {
+  assert.equal(scanExpression('(() => document.title)()', []), null);
+  assert.match(scanExpression('(() => { fetch("/api"); })()', []) ?? "", /forbidden primitive "fetch\("/);
+  assert.match(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); })()', []) ?? "", /without declaring navigate-same-origin/);
+  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); })()', ["navigate-same-origin"]), null);
+  assert.match(scanExpression('(() => { el.scrollTop = 0; })()', ["navigate-same-origin"]) ?? "", /scroll-message-list/);
+
+  let reached = 0;
+  const guarded = guardEvaluate(op("list_dms"), async () => { reached++; return 1; });
+  await assert.rejects(guarded('(() => document.cookie)()'), (err: unknown) => err instanceof DiscordOperationError && err.code === "PERMISSION_DENIED" && /Nothing was sent/.test(err.message));
+  assert.equal(reached, 0);
+  assert.equal(await guarded("(() => 1)()"), 1);
+  assert.equal(reached, 1);
 });
 
 test("an unknown operation is NOT_FOUND_OPERATION and evaluates nothing", async () => {
@@ -304,9 +309,12 @@ test("everything an operation evaluates passes the read-only scan under that ope
 test("introspect lists every operation plus itself, and details one by name", () => {
   const all = buildIntrospection({ query: "operations" }, "0.1.0");
   assert.equal(all.success, true);
-  const data = (all as { data: { _protocol: { version: string; read_only: boolean }; operations: Array<{ name: string; endpoint: string }> } }).data;
-  assert.equal(data._protocol.version, "0.1.0");
-  assert.equal(data._protocol.read_only, true);
+  const data = (all as { data: { _protocol: { version: string; mode: string; capabilities: Record<string, boolean> }; adapter: { version: string; read_only: boolean }; operations: Array<{ name: string; endpoint: string }> } }).data;
+  assert.equal(data._protocol.version, "1.0.0-alpha.1", "the spec version, as the spec requires");
+  assert.equal(data._protocol.mode, "crude");
+  assert.equal(data._protocol.capabilities.dangerous_operations, true);
+  assert.equal(data.adapter.version, "0.1.0");
+  assert.equal(data.adapter.read_only, true);
   assert.deepEqual(data.operations.map((o) => o.name), ["introspect", "list_dms", "list_guilds", "list_channels", "read_messages"]);
   assert.ok(data.operations.every((o) => o.endpoint === "READ"));
 
@@ -336,6 +344,7 @@ test("introspect describes the result types", () => {
   const one = buildIntrospection({ query: "types", name: "ReadMessagesResult" }, "0.1.0");
   assert.ok((one as { data: { type: { fields: string[] } } }).data.type.fields.includes("cursor"));
   assert.equal(failure(buildIntrospection({ query: "types", name: "Nope" }, "0.1.0")).code, "NOT_FOUND_RESOURCE");
+  assert.ok((buildIntrospection({ query: "types", name: "ListChannelsResult" }, "0.1.0") as { data: { type: { fields: string[] } } }).data.type.fields.includes("guild"));
   assert.equal(failure(buildIntrospection({ query: "everything" }, "0.1.0")).code, "VALIDATION_INVALID_TYPE");
   assert.equal(failure(buildIntrospection({}, "0.1.0")).code, "VALIDATION_INVALID_TYPE");
 });
