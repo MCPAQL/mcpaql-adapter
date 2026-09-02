@@ -259,6 +259,11 @@ export interface OpenChannelTarget {
   /** Omit or `null` for a direct or group message. */
   guildId?: string | null;
   channelId: string;
+  /**
+   * Optional message to jump to. Discord renders the history around it, so a
+   * caller resuming from a cursor need not scroll from the newest message.
+   */
+  messageId?: string | null;
 }
 
 export interface OpenChannelOptions {
@@ -281,11 +286,16 @@ export interface OpenChannelResult {
 /** Same-origin path for a channel. Only validated snowflakes reach it. */
 export function channelPath(target: OpenChannelTarget): string {
   if (!isSnowflake(target.channelId)) throw new Error(`channelId must be a Discord snowflake (got ${JSON.stringify(target.channelId)})`);
+  let anchor = "";
+  if (target.messageId !== undefined && target.messageId !== null) {
+    if (!isSnowflake(target.messageId)) throw new Error(`messageId must be a Discord snowflake (got ${JSON.stringify(target.messageId)})`);
+    anchor = `/${target.messageId}`;
+  }
   if (target.guildId !== undefined && target.guildId !== null) {
     if (!isSnowflake(target.guildId)) throw new Error(`guildId must be a Discord snowflake (got ${JSON.stringify(target.guildId)})`);
-    return `/channels/${target.guildId}/${target.channelId}`;
+    return `/channels/${target.guildId}/${target.channelId}${anchor}`;
   }
-  return `/channels/@me/${target.channelId}`;
+  return `/channels/@me/${target.channelId}${anchor}`;
 }
 
 /**
@@ -293,8 +303,14 @@ export function channelPath(target: OpenChannelTarget): string {
  * mounted and either holds one of its rows or the location names the
  * channel (an empty channel has a list with no rows).
  */
-export function mountedExpression(channelId: string, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
+export function mountedExpression(channelId: string, anchorMessageId: string | null = null, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
   if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
+  if (anchorMessageId !== null) {
+    // Resuming at an anchor: the channel's stale rows do not count. Only the anchored row itself does.
+    if (!isSnowflake(anchorMessageId)) throw new Error("anchorMessageId must be a Discord snowflake");
+    return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
+      `return l.querySelector('li[id="${selectors.messageRowPrefix}${channelId}-${anchorMessageId}"]') !== null; })()`;
+  }
   return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
     `if (l.querySelector('li[id^="${selectors.messageRowPrefix}${channelId}-"]') !== null) return true; ` +
     `return /^\\/channels\\/(?:@me|\\d+)\\/${channelId}(?:\\/|$)/.test(location.pathname); })()`;
@@ -329,7 +345,7 @@ export async function openChannel(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const path = channelPath(target);
   const started = Date.now();
-  const mounted = mountedExpression(target.channelId);
+  const mounted = mountedExpression(target.channelId, target.messageId ?? null);
 
   // Every evaluate and every sleep is bounded by what actually remains of the
   // total budget, so a hung page cannot stretch the op past `timeoutMs`, and
@@ -340,6 +356,8 @@ export async function openChannel(
     if (left <= 0) throw new OpenChannelTimeout(target.channelId, timeoutMs, path);
     return run(left);
   };
+  // With an anchor, the probe requires the anchored row itself, so a channel
+  // that is open on a stale window still navigates.
   if ((await budgeted((t) => evaluate(mounted, { timeoutMs: t }))) === true) {
     return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
   }

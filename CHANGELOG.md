@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord `read_messages` with history backfill (`src/plugins/transport/discord-history.ts`) — fourth piece of the read-only Discord adapter (#38, closes #42)
+  - `readMessages(deps, params)` opens the channel (jumping to the `before` cursor message so a resume does not scroll from the newest), extracts the mounted window, merges by id, and scrolls for older rows until `limit` is filled below `before`, the beginning of the channel is reached, `scan_cap` rows are examined, or `time_budget_ms` is spent
+  - Returns the bounded-scan envelope from #35: `{messages (newest first), count, scanned, cursor, complete, truncated, stop_reason, problem, elapsed_ms}`; every stop other than "filled" or "beginning" is `complete: false` with a resumable cursor, never silent truncation
+  - Grouped authors are resolved across windows from `author_ref`
+  - In-page steps are synchronous (`scrollNudge`, `mountedCount`) and all waiting happens in Node: Chrome throttles timers in hidden tabs, so in-page waits can stall past a transport timeout (observed live)
+  - The nudge moves the real scroller (class token stem `scroller`, containing the list) away and back to the top and dispatches a synthetic scroll event after each move; native scroll events need rendering frames, which a hidden tab never gets (verified live: 51 rows became 81 in a hidden, unfocused tab)
+  - `openChannel` accepts an anchor `messageId`; navigation paths remain same-origin and snowflake-validated
 - Discord listing and navigation (`src/plugins/transport/discord-nav.ts`) — third piece of the read-only Discord adapter (#38, closes #41)
   - In-page `listDms` (real conversations only: id, name, kind, presence, unread), `listGuilds` (server rail with unread prefixes stripped and the raw label kept), `listChannels` (channels with kind and enclosing category, plus the open server's id and name); each returns `{items, count, truncated, problem}` and is shipped to the browser as its own source text with the shared `plainText` helper inlined
   - Node-side `openChannel(evaluate, target)`: short-circuits when the channel is already mounted, otherwise changes the client's route (a history push plus the `popstate` event Discord's router handles, so no reload and no lost drafts or voice) to a same-origin path built only from validated snowflake ids, then polls for the channel's message list; every evaluate and sleep is bounded by the actual remaining budget, and only the context-replaced error is tolerated while transport failures propagate; never accepts a caller URL
