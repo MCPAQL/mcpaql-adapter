@@ -322,6 +322,19 @@ test("after a navigation, a channel whose rows have not rendered yet is polled, 
   assert.ok(extractions >= 2 && extractions <= 14, `bounded polling, got ${extractions}`);
   assert.ok(clock <= 3500, `grace period is bounded, clock at ${clock}`);
 
+  // A cap failure right after navigation is permanent: named at once, never polled.
+  clock = 0; mounted = false; let capExtractions = 0;
+  const capped = async (expr: string): Promise<unknown> => {
+    if (expr.includes("history.pushState")) { mounted = true; return true; }
+    if (expr === "EXTRACT") { capExtractions++; return { ...windowOf([], "A single message exceeds the byte cap."), truncated: true }; }
+    if (expr.includes("chat-messages-")) return mounted;
+    throw new Error(`unexpected ${expr.slice(0, 40)}`);
+  };
+  const r4 = await readMessages({ evaluate: capped, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 2000 });
+  assert.equal(r4.stop_reason, "problem");
+  assert.match(r4.problem ?? "", /byte cap/, "the extractor's own named problem, untouched");
+  assert.equal(capExtractions, 1);
+
   // A budget that runs out while the channel is still rendering is a budget stop, not a "problem".
   clock = 0; extractions = 0; mounted = false;
   const r3 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 1000 });
