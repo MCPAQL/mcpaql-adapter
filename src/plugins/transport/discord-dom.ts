@@ -281,7 +281,17 @@ export function extractMessages(
   const messages: DiscordMessage[] = [];
   let channelId: string | null = null;
   // Envelope overhead counts toward the cap so the whole result respects it.
-  let bytes = utf8Length(JSON.stringify({ channel: { id: null, label: channelLabel }, messages: [], count: 0, truncated: false, problem: null }));
+  // Seeded with the final result shape at its largest: a 20-digit channel id,
+  // count at the cap, scanned at the row count, and `truncated` true.
+  const envelopeAtMax: ExtractResult = {
+    channel: { id: "0".repeat(20), label: channelLabel },
+    messages: [],
+    count: maxMessages,
+    scanned: items.length,
+    truncated: true,
+    problem: null,
+  };
+  let bytes = utf8Length(JSON.stringify(envelopeAtMax));
   let truncated = false;
 
   // Walk newest-to-oldest so caps keep the most recent messages, then restore DOM order.
@@ -320,7 +330,8 @@ export function extractMessages(
     // Reply previews reuse the referenced message's `message-content-<refId>`, so own
     // content is matched by exact id within this row, never by prefix.
     const contentNode = li.querySelector(`[id="${sel.contentIdPrefix}${messageId}"]`);
-    const content = renderText(contentNode).trim();
+    // Not trimmed: leading indentation and trailing newlines inside code blocks are content.
+    const content = renderText(contentNode);
 
     const replyCtx = li.querySelector(sel.replyContext);
     const replyPreview = replyCtx ? replyCtx.querySelector(sel.replyContent) : null;

@@ -307,6 +307,23 @@ test("every selector-valued table entry parses in the fake DOM grammar", () => {
   }
 });
 
+test("leading indentation and trailing newlines in content are preserved", () => {
+  const code = li(D, article(D, `message-username-${D}`,
+    el("div", {}, el("h3", { "aria-labelledby": `message-username-${D}` }, el("span", { id: `message-username-${D}` }, "Alice")),
+      el("div", { id: `message-content-${D}` }, el("pre", {}, el("code", {}, "  indented\n    more\n")))),
+  ));
+  assert.equal(run(wrap(listOf("x", code)), {}).messages[0].content, "  indented\n    more\n");
+});
+
+test("the byte cap holds for the final serialized result, envelope included", () => {
+  const rows = [messageA(), messageB(), messageC(), messageD()];
+  for (const cap of [1200, 1500, 2000, 3000]) {
+    const r = run(wrap(listOf("Test Friend", ...rows.map((x) => x))), { maxBytes: cap });
+    const size = Buffer.byteLength(JSON.stringify(r), "utf8");
+    assert.ok(size <= cap || r.count === 0, `cap ${cap}: serialized ${size} bytes with ${r.count} messages`);
+  }
+});
+
 test("scanned counts every row examined, including dropped ones", () => {
   const r = run(fixture(), { maxMessages: 2 });
   assert.equal(r.scanned, 4);
