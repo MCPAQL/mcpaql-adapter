@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord MCP-AQL operation layer (`src/plugins/transport/discord-operations.ts`) — first piece of the runnable adapter (#38, part of #52)
+  - `DISCORD_OPERATIONS` registers the four read operations (`list_dms`, `list_guilds`, `list_channels`, `read_messages`) with parameter definitions, danger level, and the one documented side effect; `validateParams` fills defaults, clamps integer bounds, treats `null` as absent, and refuses unknown parameters with `VALIDATION_UNKNOWN_PARAM` rather than ignoring them
+  - `runDiscordOperation` maps each operation to the library (`buildListExpression` + the transport's `evaluate`, `readMessages`) and never throws: every failure is the `{ success: false, error }` envelope, with transport codes kept (a closed port is `TRANSPORT_CDP_PORT_CLOSED` with the launch hint), a channel that never mounts as `NOT_FOUND_RESOURCE`, and anything else as `INTERNAL_ERROR`
+  - `buildIntrospection` answers `introspect` for operations and result types; `resolveOperationArguments` accepts nested `params` or flat arguments
+  - Each operation declares the page-script effects it may use, and a test runs the read-only scan over everything an operation actually evaluated against a fake tab, so the scan covers what the server will send, not only the registry samples
+
 - Discord adapter guide (`docs/guides/discord-adapter.md`) — closes #45 for the read-only Discord adapter (#38): the library-only status (the runnable server is #52), what it is and is not, the Chrome setup including the separate profile Chrome 136+ requires, the one side effect, the Discord terms note, the functions and result shapes as they exist, untrusted-content handling, and where to look when Discord changes its markup
 - Discord untrusted-content classification (`src/plugins/transport/discord-untrusted.ts`) — the other half of #44
   - `readMessages` runs its result through the classifier: `flags`, `flagged_ids`, and `highest_severity` travel with every read; `redact` is an opt-in parameter
