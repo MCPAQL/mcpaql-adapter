@@ -355,7 +355,9 @@ test("after a navigation, rows are awaited through the row probe; an already-ope
     if (expr.includes("chat-messages-")) return true; // plain probe: open by pathname
     throw new Error(`unexpected ${expr.slice(0, 40)}`);
   };
-  const r6 = await readMessages({ evaluate: fallback, now: () => clock, sleep: async (ms) => { clock += ms; }, extractExpression: () => "EXTRACT", mountedCountExpression: () => "COUNT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 5, before: history[110].id });
+  // openChannel budgets on the real clock (1 s minimum here) with a no-op sleep, so the
+  // injected clock stays frozen; the settle wait ends when the probe reports rows.
+  const r6 = await readMessages({ evaluate: fallback, now: () => clock, sleep: async () => {}, extractExpression: () => "EXTRACT", mountedCountExpression: () => "COUNT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 5, before: history[110].id, time_budget_ms: 1000 });
   assert.equal(r6.stop_reason, "filled");
   assert.equal(probes, 2, "the fallback path waited for rows");
 });
