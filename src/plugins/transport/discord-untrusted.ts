@@ -188,6 +188,13 @@ export function classifyChannelLabel(label: string | null, options: ClassifyOpti
   return { flag, label: masked ? REDACTED : label };
 }
 
+/** The higher of two severities; null counts as none. */
+export function higherSeverity(a: SecuritySeverity | null, b: SecuritySeverity | null): SecuritySeverity | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return SEVERITY_RANK[b] > SEVERITY_RANK[a] ? b : a;
+}
+
 /** The string fields of a listing item that other people control, in the order they are scanned. */
 export const LISTING_FIELDS = ["name", "category", "raw_label"] as const;
 export type ListingField = (typeof LISTING_FIELDS)[number];

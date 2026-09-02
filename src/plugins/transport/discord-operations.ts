@@ -31,7 +31,7 @@ import {
   type Evaluate,
 } from "./discord-nav.js";
 import { FORBIDDEN_PRIMITIVES, GATED_PRIMITIVES, type DeclaredEffect } from "./discord-scripts.js";
-import { classifyListingItems } from "./discord-untrusted.js";
+import { classifyChannelLabel, classifyListingItems, higherSeverity } from "./discord-untrusted.js";
 
 // --- Registry ---
 
@@ -113,9 +113,21 @@ const listing = (fn: "listDms" | "listGuilds" | "listChannels") =>
     if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { items?: unknown }).items)) {
       throw new DiscordOperationError("INTERNAL_ERROR", `The page returned an unexpected shape for '${fn}'.`);
     }
-    const result = raw as { items: Array<{ id: string }> };
+    const result = raw as { items: Array<{ id: string }>; guild?: { id: string | null; name: string | null } };
     const classified = classifyListingItems(result.items, { redact: params.redact === true });
-    return { ...result, items: classified.items, flags: classified.flags, flagged_ids: classified.flagged_ids, highest_severity: classified.highest_severity };
+    const out: Record<string, unknown> = { ...result, items: classified.items, flags: classified.flags, flagged_ids: classified.flagged_ids, highest_severity: classified.highest_severity };
+    // list_channels also names the open server, and its owner chose that name.
+    if (result.guild !== undefined) {
+      const { flag, label } = classifyChannelLabel(result.guild.name, { redact: params.redact === true });
+      out.guild = { ...result.guild, name: label };
+      if (flag !== null) {
+        const guildFlag = { ...flag, field: "listing.name" as const, item_id: result.guild.id ?? undefined };
+        out.flags = [...classified.flags, guildFlag];
+        out.flagged_ids = result.guild.id !== null && !classified.flagged_ids.includes(result.guild.id) ? [...classified.flagged_ids, result.guild.id] : classified.flagged_ids;
+        out.highest_severity = higherSeverity(classified.highest_severity, flag.severity);
+      }
+    }
+    return out;
   };
 
 export const DISCORD_OPERATIONS: readonly DiscordOperation[] = [
@@ -350,8 +362,14 @@ export function scanExpression(expression: string, effects: readonly DeclaredEff
   // /channels/ paths, and the only events that may be constructed or dispatched
   // are the one each declared effect exists for.
   const permittedEvents = new Set(effects.map((e) => EVENT_FOR_EFFECT[e]));
-  for (const m of expression.matchAll(/history\.(?:push|replace)State\([^)]*?,\s*"([^"]*)"\)/g)) {
-    if (!m[1].startsWith("/channels/")) return `navigates to ${JSON.stringify(m[1])}, not a /channels/ path`;
+  // Every history call must be the exact shape `navigateExpression` emits, with a
+  // literal channel path; any other spelling (single quotes, a variable, a
+  // relative segment) is refused rather than validated.
+  const historyCalls = (expression.match(/history\.(?:push|replace)State\(/g) ?? []).length;
+  const strict = [...expression.matchAll(/history\.(?:push|replace)State\(\{\}, "", "([^"]*)"\)/g)];
+  if (strict.length !== historyCalls) return "navigates with a shape the guard cannot validate (only history.pushState({}, \"\", \"<literal path>\") is allowed)";
+  for (const m of strict) {
+    if (!CHANNEL_PATH.test(m[1])) return `navigates to ${JSON.stringify(m[1])}, not a channel path`;
   }
   const dispatches = (expression.match(/dispatchEvent\(/g) ?? []).length;
   const inline = [...expression.matchAll(/dispatchEvent\(new \w+\("([^"]+)"/g)];
@@ -364,6 +382,9 @@ export function scanExpression(expression: string, effects: readonly DeclaredEff
   }
   return null;
 }
+
+/** The only paths navigation may push: what `channelPath` builds, nothing else. */
+const CHANNEL_PATH = new RegExp(`^/channels/(?:@me|${SNOWFLAKE_PATTERN.slice(1, -1)})/${SNOWFLAKE_PATTERN.slice(1, -1)}(?:/${SNOWFLAKE_PATTERN.slice(1, -1)})?$`);
 
 /** The one event type each effect exists for. */
 const EVENT_FOR_EFFECT: Readonly<Record<DeclaredEffect, string>> = { "scroll-message-list": "scroll", "navigate-same-origin": "popstate" };
