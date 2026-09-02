@@ -21,8 +21,8 @@ import {
   navigateExpression,
   openChannel,
   resolveListOptions,
-  type DomRoot,
 } from "../src/plugins/transport/discord-nav.js";
+import type { DomRoot } from "../src/plugins/transport/discord-dom.js";
 import { FakeNode, el } from "./helpers/fake-dom.js";
 
 const G = "1210290974601773056";
@@ -36,7 +36,7 @@ const SEL = DISCORD_NAV_SELECTORS;
 const OPTS = resolveListOptions({});
 
 function documentShaped(root: FakeNode): DomRoot {
-  return { querySelector: (q) => root.querySelector(q), querySelectorAll: (q) => root.querySelectorAll(q) };
+  return { querySelector: (q: string) => root.querySelector(q), querySelectorAll: (q: string) => root.querySelectorAll(q) };
 }
 
 // --- Fixtures ---
