@@ -17,18 +17,18 @@ What this repository ships today is the adapter as a **library**: the transport,
 
 1. Start Chrome with remote debugging enabled and a separate profile directory, then log in to Discord in that Chrome window.
 
-   Chrome 136 and later open the debugging port only when `--user-data-dir` points somewhere other than the default profile, so the command uses a dedicated directory. That profile has its own logins: sign in to Discord there once.
+   Chrome 136 and later open the debugging port only when `--user-data-dir` points somewhere other than the default profile, so the command uses a dedicated directory. That profile has its own logins: sign in to Discord there once. This is a second Chrome instance (on macOS, `open -n` is what makes it one; without it a running Chrome is only brought to the front and the flags never reach a process), so your normal Chrome can stay open.
 
    macOS:
 
    ```sh
-   open -a "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
+   open -n -a "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-debug"
    ```
 
    Linux:
 
    ```sh
-   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
+   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-debug"
    ```
 
    The transport connects to `127.0.0.1:9222` unless its `port` option says otherwise. When the port is closed, the error message includes both commands above.
