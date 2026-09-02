@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord untrusted-content classification (`src/plugins/transport/discord-untrusted.ts`) — the other half of #44
+  - `readMessages` runs its result through the classifier: `flags`, `flagged_ids`, and `highest_severity` travel with every read; `redact` is an opt-in parameter
+  - `classifyDiscordMessages` runs every text field (content, author, reply label, embed title/description/provider, attachment filename) through the `@mcpaql/security` content validator and reports flags per message and per field with severity and pattern names; nothing is changed unless `redact` is set, and then only `high`/`critical` fields; input is never mutated; oversize fields are flagged rather than scanned
+- Discord page-script registry and read-only scan (`src/plugins/transport/discord-scripts.ts`, `test/discord-read-only.test.ts`) — part of #44 for the read-only Discord adapter (#38)
+  - Every script the adapter evaluates in the page is registered with the side effects it declares (`navigate-same-origin`, `scroll-message-list`); a test fails if a function marked SELF-CONTAINED in a Discord module is missing from the registry
+  - No script may use an input, network, storage, identity, or injection primitive (focus, click, key events, `fetch`, cookies, storage, `eval`, script elements, Discord client internals); gated primitives (`history.pushState`, `scrollTop`, `dispatchEvent`) are allowed only under a declared effect, a declared effect must actually be used, dispatched events must match the effect (`scroll` or `popstate`), navigation targets must be `/channels/` paths, and no script may reload the client
 - Discord `read_messages` with history backfill (`src/plugins/transport/discord-history.ts`) — fourth piece of the read-only Discord adapter (#38, closes #42)
   - `readMessages(deps, params)` opens the channel (jumping to the `before` cursor message so a resume does not scroll from the newest), extracts the mounted window, merges by id, and scrolls for older rows until `limit` is filled below `before`, the beginning of the channel is reached, `scan_cap` rows are examined, or `time_budget_ms` is spent
   - Returns the bounded-scan envelope from #35: `{messages (newest first), count, scanned, cursor, complete, truncated, stop_reason, problem, elapsed_ms}`; every stop other than "filled" or "beginning" is `complete: false` with a resumable cursor, never silent truncation
