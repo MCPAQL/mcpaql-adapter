@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Discord adapter guide (`docs/guides/discord-adapter.md`) — closes #45 for the read-only Discord adapter (#38): what it is and is not, the two-step setup with the exact Chrome command, the one side effect, the Discord terms note, the operations table and envelope, untrusted-content handling, and where to look when Discord changes its markup
+- Discord adapter guide (`docs/guides/discord-adapter.md`) — closes #45 for the read-only Discord adapter (#38): the library-only status (the runnable server is #52), what it is and is not, the Chrome setup including the separate profile Chrome 136+ requires, the one side effect, the Discord terms note, the functions and result shapes as they exist, untrusted-content handling, and where to look when Discord changes its markup
 - Discord untrusted-content classification (`src/plugins/transport/discord-untrusted.ts`) — the other half of #44
   - `readMessages` runs its result through the classifier: `flags`, `flagged_ids`, and `highest_severity` travel with every read; `redact` is an opt-in parameter
   - `classifyDiscordMessages` runs every text field (content, author, reply label, embed title/description/provider, attachment filename) through the `@mcpaql/security` content validator and reports flags per message and per field with severity and pattern names; nothing is changed unless `redact` is set, and then only `high`/`critical` fields; input is never mutated; oversize fields are flagged rather than scanned

@@ -331,9 +331,9 @@ export function navigateExpression(path: string): string {
 
 /**
  * Open a channel in the attached tab and wait for its messages to mount.
- * Navigation is a same-origin `location.assign` of a validated path; the
- * transport's origin guard applies to every poll. Side effect: Discord
- * marks the channel read, exactly as clicking it does.
+ * Navigation is a same-document route change (history push plus `popstate`)
+ * to a validated path; the transport's origin guard applies to every poll.
+ * Side effect: Discord marks the channel read, exactly as clicking it does.
  */
 export async function openChannel(
   evaluate: Evaluate,

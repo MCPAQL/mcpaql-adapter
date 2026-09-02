@@ -2,6 +2,10 @@
 
 The Discord adapter reads your Discord conversations out of the Discord web client that is already open in your browser. That is the whole idea: it is a faster, structured copy-paste of a screen you already have in front of you. It reads. It never writes.
 
+## Status
+
+What this repository ships today is the adapter as a **library**: the transport, the page scripts, the listing and history functions, and the read-only and untrusted-content checks, all under `src/plugins/transport/`. The runnable server that exposes them as MCP-AQL operations to a client is tracked separately; until it lands, the operations below are library functions called from code, and the setup section describes what that server will need from you.
+
 ## What it is, and what it is not
 
 - It is **not a bot**. Nothing is added to any server, and no server admin is involved.
@@ -11,27 +15,27 @@ The Discord adapter reads your Discord conversations out of the Discord web clie
 
 ## Setup
 
-Two steps.
+1. Start Chrome with remote debugging enabled and a separate profile directory, then log in to Discord in that Chrome window.
 
-1. Start Chrome with remote debugging enabled, then log in to Discord in that Chrome window.
+   Chrome 136 and later open the debugging port only when `--user-data-dir` points somewhere other than the default profile, so the command uses a dedicated directory. That profile has its own logins: sign in to Discord there once.
 
    macOS:
 
    ```sh
-   open -a "Google Chrome" --args --remote-debugging-port=9222
+   open -a "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
    ```
 
    Linux:
 
    ```sh
-   google-chrome --remote-debugging-port=9222
+   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
    ```
 
-   The port is the default the adapter looks for. Set `MCPAQL_CDP_PORT` to use another one. If the port is closed when the adapter starts, its error message prints the exact command for your platform.
+   The transport connects to `127.0.0.1:9222` unless its `port` option says otherwise. When the port is closed, the error message includes both commands above.
 
-2. Install the adapter and point your MCP client at it, like any other MCP-AQL adapter.
+2. Point the adapter at that Chrome. Today that means constructing `BrowserCdpTransport({ allowedOrigin: "https://discord.com" })` from code; the runnable server will take the same setting from its configuration.
 
-That is all. Keep the Discord tab open; it can be in the background, in another window, and unfocused. The adapter works with the tab hidden.
+Keep the Discord tab open. It can be in the background, in another window, and unfocused: the adapter works with the tab hidden.
 
 ## The one side effect
 
@@ -43,34 +47,37 @@ Discord prohibits automating user accounts. This adapter does not use the Discor
 
 ## Operations
 
-All operations are reads. Every listing and history result carries the bounded-scan envelope used across this repository, so a caller can always tell whether it got everything and where to resume.
+All operations are reads.
 
-| Operation | Parameters | Returns |
-|---|---|---|
-| `list_dms` | `limit` | Direct and group conversations: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded. |
-| `list_guilds` | `limit` | Servers you belong to: id, name, and the raw sidebar label. |
-| `list_channels` | `limit` | Text and voice channels of the open server with their category, plus the server's id and name. |
-| `read_messages` | `channel_id`, `guild_id?`, `before?`, `limit`, `scan_cap`, `time_budget_ms` | Messages newest first with author, timestamp, full text, replies, reactions, attachment links, embeds, links, edited flag. |
+| Operation | Function | Parameters | Returns |
+|---|---|---|---|
+| `list_dms` | `listDms` via `buildListExpression("listDms")` | `limit` | Direct and group conversations: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded. |
+| `list_guilds` | `listGuilds` via `buildListExpression("listGuilds")` | `limit` | Servers you belong to: id, name, and the raw sidebar label. |
+| `list_channels` | `listChannels` via `buildListExpression("listChannels")` | `limit` | Text and voice channels of the open server with their category, plus the server's id and name. |
+| `read_messages` | `readMessages` | `channel_id` (required), `guild_id`, `before`, `limit` (50), `scan_cap` (2000), `time_budget_ms` (20000), `window_max_bytes` (4 MiB), `redact` (false) | Messages newest first with author, timestamp, full text, replies, reactions, attachment links, embeds, links, edited flag. |
 
-`read_messages` envelope:
+The three listings return `{ items, count, truncated, problem }`. They read what the sidebar shows at that moment; `truncated` means `limit` cut the list, and there is no cursor: raise `limit` and call again.
+
+`read_messages` returns:
 
 ```text
-{ channel, messages, count, scanned, cursor, complete, truncated, stop_reason, problem, elapsed_ms }
+{ channel, messages, count, scanned, cursor, complete, truncated, stop_reason, problem, elapsed_ms, flags, flagged_ids, highest_severity }
 ```
 
-- `complete` is true when the beginning of the channel was reached or `limit` was filled.
-- `truncated` is true when a cap or the time budget stopped the read first. The result then carries a `cursor`: pass it as `before` to continue without gaps or duplicates. The adapter never truncates silently.
-- `stop_reason` says which of `filled`, `beginning`, `scan_cap`, `time_budget`, `no_growth`, or `problem` ended the read.
+- `complete` is true when `limit` was filled or the beginning of the channel was reached (two consecutive scroll steps with no older history mounting and no loading placeholder above the rows).
+- `truncated` is the opposite of `complete`: a cap, the time budget, a stall, or a problem stopped the read first. `stop_reason` says which: `filled`, `beginning`, `scan_cap`, `time_budget`, `no_growth`, or `problem`.
+- `cursor` is where to continue: the oldest message returned, or, when an incomplete read returned nothing older than `before`, `before` itself. It is null only when the read was complete and returned nothing, or when an incomplete read returned nothing and had no `before`. Pass it as `before` to continue without gaps or duplicates. The adapter never truncates silently.
+- `flags`, `flagged_ids`, `highest_severity` are the untrusted-content findings described below.
 
 Attachments are returned as URLs and filenames only; nothing is downloaded.
 
 ## Untrusted content
 
-Everything the adapter reads was written by someone else. Every text field, including author names, reply labels, embed text, and attachment names, is run through the repository's security validator. Prompt-injection and homoglyph findings are reported per message and per field with a severity. The text itself is not changed unless a caller asks for redaction, and then only for high or critical findings. The flags travel with the result so nothing is silently laundered.
+Everything the adapter reads was written by someone else. Every string field, including author names, reply labels, embed text and URLs, attachment names and URLs, links, reaction emoji, and the channel label, is run through the repository's security validator. Prompt-injection and homoglyph findings are reported per message and per field with a severity. Text that only mixes scripts, as bilingual messages do, is reported at most `medium` and never masked. The text itself is not changed unless `redact` is set, and then a `high` or `critical` field is replaced by a mask, never by normalized text. The flags travel with the result so nothing is silently laundered.
 
 ## When Discord changes its markup
 
-Discord hashes its class names and changes its page structure from time to time. The adapter selects elements by the stable attributes Discord uses for accessibility and navigation (`data-list-id`, element id prefixes, `role`, `datetime`) and keeps every selector in one table per module:
+Discord hashes its class names and changes its page structure from time to time. The adapter prefers the stable attributes Discord uses for accessibility and navigation (`data-list-id`, element id prefixes, `role`, `datetime`), and where no such attribute exists it matches the un-hashed stem of a class name (`reaction_`, `embed`, `edited`, `scroller`, the loading placeholder). Those stem matches are the selectors most likely to break. Every selector lives in one table per module:
 
 - `src/plugins/transport/discord-dom.ts` — messages
 - `src/plugins/transport/discord-nav.ts` — sidebars and navigation

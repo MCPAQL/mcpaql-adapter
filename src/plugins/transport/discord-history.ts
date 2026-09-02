@@ -211,8 +211,8 @@ export interface ReadMessagesParams {
   /** Bytes allowed per in-page extraction. @default 4 MiB */
   window_max_bytes?: number;
   /**
-   * Replace `high`/`critical` untrusted-content findings with the security
-   * validator's sanitized text. Off by default: the flags are always
+   * Mask `high`/`critical` untrusted-content findings with `[CONTENT_BLOCKED]`
+   * (never with normalized text). Off by default: the flags are always
    * reported; the text is left for the reader to judge.
    */
   redact?: boolean;
