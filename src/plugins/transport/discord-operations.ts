@@ -30,6 +30,7 @@ import {
   type Evaluate,
 } from "./discord-nav.js";
 import { FORBIDDEN_PRIMITIVES, GATED_PRIMITIVES, type DeclaredEffect } from "./discord-scripts.js";
+import { classifyListingItems } from "./discord-untrusted.js";
 
 // --- Registry ---
 
@@ -91,16 +92,37 @@ const limitParam = (what: string): ParamDefinition => ({
   description: `Most ${what} to return. There is no cursor: raise the limit and call again when truncated is true.`,
 });
 
+const redactParam: ParamDefinition = {
+  name: "redact",
+  type: "boolean",
+  required: false,
+  default: false,
+  description: "Mask high and critical untrusted-content findings with [CONTENT_BLOCKED]. Flags are reported either way.",
+};
+
+/**
+ * A listing handler: evaluate the registered builder, then run every name
+ * through the untrusted-content classifier. Group DM members, server
+ * owners, and channel moderators choose those names, so they travel with
+ * `flags`, `flagged_ids`, and `highest_severity` like message text does.
+ */
 const listing = (fn: "listDms" | "listGuilds" | "listChannels") =>
-  (deps: DiscordOperationDeps, params: Record<string, unknown>): Promise<unknown> =>
-    deps.evaluate(buildListExpression(fn, { limit: params.limit as number }));
+  async (deps: DiscordOperationDeps, params: Record<string, unknown>): Promise<unknown> => {
+    const raw = await deps.evaluate(buildListExpression(fn, { limit: params.limit as number }));
+    if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { items?: unknown }).items)) {
+      throw new DiscordOperationError("INTERNAL_ERROR", `The page returned an unexpected shape for '${fn}'.`);
+    }
+    const result = raw as { items: Array<{ id: string }> };
+    const classified = classifyListingItems(result.items, { redact: params.redact === true });
+    return { ...result, items: classified.items, flags: classified.flags, flagged_ids: classified.flagged_ids, highest_severity: classified.highest_severity };
+  };
 
 export const DISCORD_OPERATIONS: readonly DiscordOperation[] = [
   {
     name: "list_dms",
     endpoint: "READ",
     description: "Direct and group message conversations from the Discord sidebar: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded.",
-    params: [limitParam("conversations")],
+    params: [limitParam("conversations"), redactParam],
     effects: [],
     danger_level: "safe",
     side_effect: null,
@@ -110,7 +132,7 @@ export const DISCORD_OPERATIONS: readonly DiscordOperation[] = [
     name: "list_guilds",
     endpoint: "READ",
     description: "Servers the signed-in user belongs to, from the server rail: id, name, and the raw sidebar label.",
-    params: [limitParam("servers")],
+    params: [limitParam("servers"), redactParam],
     effects: [],
     danger_level: "safe",
     side_effect: null,
@@ -120,7 +142,7 @@ export const DISCORD_OPERATIONS: readonly DiscordOperation[] = [
     name: "list_channels",
     endpoint: "READ",
     description: "Text and voice channels of the server currently open in the Discord tab, with their category, plus that server's id and name. Open the server in the tab first.",
-    params: [limitParam("channels")],
+    params: [limitParam("channels"), redactParam],
     effects: [],
     danger_level: "safe",
     side_effect: null,
@@ -138,7 +160,7 @@ export const DISCORD_OPERATIONS: readonly DiscordOperation[] = [
       { name: "scan_cap", type: "integer", required: false, default: 2000, min: 1, max: 100_000, description: "Most rows examined across all scroll steps." },
       { name: "time_budget_ms", type: "integer", required: false, default: 20_000, min: 1000, max: 300_000, description: "Wall-clock budget for the whole read, in milliseconds. A channel that does not open within it is reported as not found; raise it for a slow tab." },
       { name: "window_max_bytes", type: "integer", required: false, default: 4 * 1024 * 1024, min: 64 * 1024, max: 8 * 1024 * 1024, description: "Bytes allowed per in-page extraction." },
-      { name: "redact", type: "boolean", required: false, default: false, description: "Mask high and critical untrusted-content findings with [CONTENT_BLOCKED]. Flags are reported either way." },
+      redactParam,
     ],
     effects: ["navigate-same-origin", "scroll-message-list"],
     danger_level: "safe",
@@ -154,8 +176,8 @@ export const DISCORD_TYPES: ReadonlyArray<{ name: string; kind: "object"; descri
   { name: "DiscordGuild", kind: "object", description: "A server from the server rail.", fields: ["id", "name", "raw_label"] },
   { name: "DiscordChannel", kind: "object", description: "A channel of the open server.", fields: ["id", "name", "kind", "category", "href"] },
   { name: "DiscordMessage", kind: "object", description: "One rendered message. Attachments are URLs and filenames only; nothing is downloaded.", fields: ["id", "channel_id", "author", "author_inherited", "author_ref", "timestamp", "content", "reply_to", "reply_label", "reactions", "attachments", "embeds", "links", "edited"] },
-  { name: "ListResult", kind: "object", description: "Envelope of list_dms and list_guilds. `problem` names why the list is empty when the page did not look as expected.", fields: ["items", "count", "truncated", "problem"] },
-  { name: "ListChannelsResult", kind: "object", description: "Envelope of list_channels: a ListResult plus the open server's id and name.", fields: ["guild", "items", "count", "truncated", "problem"] },
+  { name: "ListResult", kind: "object", description: "Envelope of list_dms and list_guilds. `problem` names why the list is empty when the page did not look as expected; `flags`, `flagged_ids`, and `highest_severity` are untrusted-content findings on the names.", fields: ["items", "count", "truncated", "problem", "flags", "flagged_ids", "highest_severity"] },
+  { name: "ListChannelsResult", kind: "object", description: "Envelope of list_channels: a ListResult plus the open server's id and name.", fields: ["guild", "items", "count", "truncated", "problem", "flags", "flagged_ids", "highest_severity"] },
   { name: "ReadMessagesResult", kind: "object", description: "Bounded-scan envelope of read_messages. `complete` is true only when limit was filled or the beginning was reached; otherwise `stop_reason` says why and `cursor` is where to continue.", fields: ["channel", "messages", "count", "scanned", "cursor", "complete", "truncated", "stop_reason", "problem", "elapsed_ms", "flags", "flagged_ids", "highest_severity"] },
 ];
 
@@ -323,8 +345,27 @@ export function scanExpression(expression: string, effects: readonly DeclaredEff
       if (expression.includes(primitive)) return `uses ${JSON.stringify(primitive)} without declaring ${effect}`;
     }
   }
+  // The effects have meaning beyond their primitives: navigation may only push
+  // /channels/ paths, and the only events that may be constructed or dispatched
+  // are the one each declared effect exists for.
+  const permittedEvents = new Set(effects.map((e) => EVENT_FOR_EFFECT[e]));
+  for (const m of expression.matchAll(/history\.(?:push|replace)State\([^)]*?,\s*"([^"]*)"\)/g)) {
+    if (!m[1].startsWith("/channels/")) return `navigates to ${JSON.stringify(m[1])}, not a /channels/ path`;
+  }
+  const dispatches = (expression.match(/dispatchEvent\(/g) ?? []).length;
+  const inline = [...expression.matchAll(/dispatchEvent\(new \w+\("([^"]+)"/g)];
+  if (inline.length !== dispatches) return "dispatches an event whose type is not an inline literal";
+  for (const m of inline) {
+    if (!permittedEvents.has(m[1])) return `dispatches a ${JSON.stringify(m[1])} event, which no declared effect permits`;
+  }
+  for (const m of expression.matchAll(/new \w+\("([a-z]+)"(?:,|\))/g)) {
+    if (!permittedEvents.has(m[1])) return `constructs a ${JSON.stringify(m[1])} event, which no declared effect permits`;
+  }
   return null;
 }
+
+/** The one event type each effect exists for. */
+const EVENT_FOR_EFFECT: Readonly<Record<DeclaredEffect, string>> = { "scroll-message-list": "scroll", "navigate-same-origin": "popstate" };
 
 /** Wrap an evaluate so every expression is scanned under `op.effects` before it reaches the page. */
 export function guardEvaluate(op: DiscordOperation, evaluate: Evaluate): Evaluate {
