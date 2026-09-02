@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browser-session transport plugin (`src/plugins/transport/browser-cdp.ts`) — first piece of the read-only Discord adapter (#38, closes #39)
+  - Attaches to the user's already-running Chrome over the DevTools Protocol using Node's built-in WebSocket and `fetch`; zero runtime dependencies
+  - Read-only by construction: a three-method allowlist (`Runtime.enable`, `Runtime.disable`, `Runtime.evaluate`) checked on every send, with a forbidden-prefix list (`Input.`, `Page.navigate`, storage, target, browser domains) asserted by test
+  - Origin pinning: only a page target on the configured origin is selected, and the origin is re-verified before every evaluate; a tab that navigates away closes the session
+  - Named, never-empty failures: port closed (with the exact Chrome launch flag), no target, origin refused, method denied, timeout, page exception, result too large, disconnected, protocol error
+  - Result size cap and per-call timeouts
+  - 33 unit tests against fake socket and fetch doubles
+
 - `@mcpaql/security` package (`src/security/`) — standalone security infrastructure ported from DollhouseMCP
   - `tool-classification.ts` — CLI tool risk assessment with 50+ dangerous patterns, risk scoring 0-100
   - `content-validator.ts` — 45+ prompt injection patterns, HTML/XSS detection, YAML bomb detection
