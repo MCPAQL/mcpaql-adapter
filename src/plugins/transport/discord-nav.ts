@@ -289,11 +289,16 @@ export function channelPath(target: OpenChannelTarget): string {
   return `/channels/@me/${target.channelId}`;
 }
 
-/** Expression that reports whether the message list for `channelId` is mounted. */
+/**
+ * Expression that reports whether `channelId` is open: its message list is
+ * mounted and either holds one of its rows or the location names the
+ * channel (an empty channel has a list with no rows).
+ */
 export function mountedExpression(channelId: string, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
   if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
-  return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); ` +
-    `return l !== null && l.querySelector('li[id^="chat-messages-${channelId}-"]') !== null; })()`;
+  return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
+    `if (l.querySelector('li[id^="chat-messages-${channelId}-"]') !== null) return true; ` +
+    `return /^\\/channels\\/(?:@me|\\d+)\\/${channelId}(?:\\/|$)/.test(location.pathname); })()`;
 }
 
 /** Expression that navigates to a same-origin path. Only `channelPath` output is ever passed. */
@@ -320,11 +325,14 @@ export async function openChannel(
   const started = Date.now();
   const mounted = mountedExpression(target.channelId);
 
-  if ((await evaluate(mounted)) === true) {
+  // Every evaluate is bounded by what remains of the total budget, so a hung
+  // page cannot stretch the op past `timeoutMs`.
+  const remaining = (): number => Math.max(200, timeoutMs - (Date.now() - started));
+  if ((await evaluate(mounted, { timeoutMs: remaining() })) === true) {
     return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
   }
   try {
-    await evaluate(navigateExpression(path));
+    await evaluate(navigateExpression(path), { timeoutMs: remaining() });
   } catch {
     // Same-document navigation can destroy the execution context before the
     // evaluate returns; the mount poll below decides whether it worked.
@@ -333,7 +341,7 @@ export async function openChannel(
     await sleep(pollMs);
     let ok = false;
     try {
-      ok = (await evaluate(mounted)) === true;
+      ok = (await evaluate(mounted, { timeoutMs: remaining() })) === true;
     } catch {
       ok = false; // context still being replaced; keep polling
     }
