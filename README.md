@@ -31,7 +31,7 @@ For **normative protocol specifications** (wire format, schema semantics, interf
 | [Development Guide](docs/guides/development.md) | How to build MCP-AQL adapters |
 | [Testing Guide](docs/guides/testing.md) | Testing patterns for adapters |
 | [Migration Guide](docs/guides/migration.md) | Migrating from MCP server to MCP-AQL adapter |
-| [Discord Adapter](docs/guides/discord-adapter.md) | Read-only Discord adapter: setup, operations, posture |
+| [Discord Adapter](docs/guides/discord-adapter.md) | Read-only Discord adapter (runnable MCP server): setup, operations, posture |
 
 ### Architecture Decision Records
 

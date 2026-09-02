@@ -4,11 +4,21 @@
   "private": true,
   "description": "Reference implementation of the MCP-AQL adapter runtime with plugin system",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mcpaql-discord": "dist/bin/discord.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test \"test/**/*.test.ts\""
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "discord": "tsx src/bin/discord.ts"
   },
   "license": "SEE LICENSE IN LICENSE",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
   "devDependencies": {
     "@types/node": "^24.3.0",
     "tsx": "^4.20.5",
