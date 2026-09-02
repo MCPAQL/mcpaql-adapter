@@ -12,8 +12,11 @@ import {
   BrowserCdpTransport,
   CdpTransportError,
   FORBIDDEN_CDP_PREFIXES,
+  ORIGIN_MISMATCH_KEY,
   discoverTargets,
+  guardExpression,
   launchHint,
+  originMismatchOf,
   originOf,
   selectTarget,
   type CdpTarget,
@@ -61,15 +64,24 @@ class FakeSocket implements WebSocketLike {
   }
 }
 
+/** The expression the adapter asked for, unwrapped from the origin guard. */
+function innerExpression(params: Record<string, unknown>): string {
+  const m = /return \(([\s\S]*)\); \}\)\(\)$/.exec(String(params.expression));
+  return m ? m[1] : String(params.expression);
+}
+
+/** Mimics the page: a guarded expression on the wrong origin returns the mismatch marker. */
 function defaultRespond(
   msg: { id: number; method: string; params: Record<string, unknown> },
   origin: string,
 ): unknown {
   if (msg.method === "Runtime.enable") return { id: msg.id, result: {} };
   if (msg.method === "Runtime.evaluate") {
-    const expr = String(msg.params.expression);
-    if (expr === "location.origin") return { id: msg.id, result: { result: { type: "string", value: origin } } };
-    return { id: msg.id, result: { result: { type: "string", value: `evaluated:${expr}` } } };
+    const guardedFor = /location\.origin !== "([^"]+)"/.exec(String(msg.params.expression))?.[1];
+    if (guardedFor && guardedFor !== origin) {
+      return { id: msg.id, result: { result: { type: "object", value: { [ORIGIN_MISMATCH_KEY]: origin } } } };
+    }
+    return { id: msg.id, result: { result: { type: "string", value: `evaluated:${innerExpression(msg.params)}` } } };
   }
   return { id: msg.id, error: { code: -32601, message: "unknown method" } };
 }
@@ -143,7 +155,7 @@ test("send refuses any method outside the allowlist before touching the socket",
 test("evaluate never requests a user gesture", async () => {
   const { transport, socket } = make();
   await transport.evaluate("1+1");
-  const evals = socket.sent.filter((m) => m.method === "Runtime.evaluate" && m.params.expression === "1+1");
+  const evals = socket.sent.filter((m) => m.method === "Runtime.evaluate" && innerExpression(m.params) === "1+1");
   assert.equal(evals.length, 1);
   assert.equal(evals[0].params.userGesture, false);
   assert.equal(evals[0].params.returnByValue, true);
@@ -266,19 +278,77 @@ test("evaluate rejects an empty expression without touching the socket", async (
   assert.equal(socket.sent.length, 0);
 });
 
-test("evaluate re-checks origin before every call and closes on drift", async () => {
+test("origin guard is inside the evaluated expression, so a navigated tab never runs it", async () => {
   const { transport, socket } = make();
   await transport.evaluate("1");
   socket.respond = (msg) => defaultRespond(msg, "https://evil.example");
-  await expectCode(transport.evaluate("2"), "TRANSPORT_CDP_ORIGIN_REFUSED");
+  const err = await expectCode(transport.evaluate("2"), "TRANSPORT_CDP_ORIGIN_REFUSED");
+  assert.match(err.message, /evil\.example/);
   assert.equal(socket.closed, true, "session must close when the tab leaves the origin");
+  assert.equal(transport.attachedTarget, null);
+  const evals = socket.sent.filter((m) => m.method === "Runtime.evaluate");
+  assert.equal(evals.length, 2, "one evaluate per call: check and expression share one round trip");
+  for (const e of evals) assert.match(String(e.params.expression), /location\.origin !== "https:\/\/discord\.com"/);
+});
+
+test("guardExpression returns the marker instead of running on another origin", () => {
+  const expr = guardExpression("1+1", "https://discord.com");
+  assert.match(expr, /^\(async \(\) => \{ if \(location\.origin !== "https:\/\/discord\.com"\)/);
+  assert.match(expr, /return \(1\+1\); \}\)\(\)$/);
+  assert.equal(originMismatchOf({ [ORIGIN_MISMATCH_KEY]: "https://x.example" }), "https://x.example");
+  assert.equal(originMismatchOf({ other: 1 }), null);
+  assert.equal(originMismatchOf("string"), null);
+});
+
+test("discoverTargets: a stalled body is a TIMEOUT, unreadable JSON is a PROTOCOL_ERROR", async () => {
+  const stalled: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+  await expectCode(discoverTargets("h", 1, stalled, 30), "TRANSPORT_CDP_TIMEOUT");
+  const garbage: FetchLike = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token <"); } });
+  const err = await expectCode(discoverTargets("h", 1, garbage, 200), "TRANSPORT_CDP_PROTOCOL_ERROR");
+  assert.match(err.message, /Unexpected token/);
+});
+
+test("a failed or dangling handshake closes the socket it opened", async () => {
+  const erroring = new FakeSocket("");
+  erroring.autoOpen = false;
+  erroring.autoError = new Error("refused");
+  const { transport: t1 } = make({ socket: erroring });
+  await expectCode(t1.connect(), "TRANSPORT_CDP_DISCONNECTED");
+  assert.equal(erroring.closed, true);
+
+  const dangling = new FakeSocket("");
+  dangling.autoOpen = false;
+  const { transport: t2 } = make({ socket: dangling, timeoutMs: 30 });
+  await expectCode(t2.connect(), "TRANSPORT_CDP_TIMEOUT");
+  assert.equal(dangling.closed, true);
+});
+
+test("concurrent first calls share one connection attempt and one socket", async () => {
+  let created = 0;
+  const transport = new BrowserCdpTransport(
+    { allowedOrigin: ORIGIN, timeoutMs: 200 },
+    { fetchImpl: fakeFetch([discordTab]), socketFactory: () => { created++; return new FakeSocket(""); } },
+  );
+  const results = await Promise.all([transport.evaluate("a"), transport.evaluate("b"), transport.connect()]);
+  assert.equal(created, 1);
+  assert.deepEqual(results.slice(0, 2), ["evaluated:a", "evaluated:b"]);
+});
+
+test("a Runtime.enable failure tears the session down", async () => {
+  const socket = new FakeSocket("");
+  socket.respond = (msg) => (msg.method === "Runtime.enable"
+    ? { id: msg.id, error: { code: -32000, message: "nope" } }
+    : defaultRespond(msg, ORIGIN));
+  const { transport } = make({ socket });
+  await expectCode(transport.connect(), "TRANSPORT_CDP_PROTOCOL_ERROR");
+  assert.equal(socket.closed, true);
   assert.equal(transport.attachedTarget, null);
 });
 
 test("evaluate surfaces page exceptions as EVALUATE_ERROR", async () => {
   const { transport, socket } = make();
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "boom()") {
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "boom()") {
       return { id: msg.id, result: { exceptionDetails: { text: "Uncaught", exception: { description: "ReferenceError: boom is not defined" } } } };
     }
     return defaultRespond(msg, ORIGIN);
@@ -290,7 +360,7 @@ test("evaluate surfaces page exceptions as EVALUATE_ERROR", async () => {
 test("evaluate enforces the result size cap", async () => {
   const socket = new FakeSocket("");
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "big") {
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "big") {
       return { id: msg.id, result: { result: { type: "string", value: "x".repeat(2000) } } };
     }
     return defaultRespond(msg, ORIGIN);
@@ -305,7 +375,7 @@ test("evaluate enforces the result size cap", async () => {
 test("evaluate surfaces DevTools error responses as PROTOCOL_ERROR", async () => {
   const { transport, socket } = make();
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "x") {
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "x") {
       return { id: msg.id, error: { code: -32000, message: "Context destroyed" } };
     }
     return defaultRespond(msg, ORIGIN);
@@ -317,7 +387,7 @@ test("evaluate surfaces DevTools error responses as PROTOCOL_ERROR", async () =>
 test("evaluate times out when the page never answers", async () => {
   const { transport, socket } = make({ timeoutMs: 30 });
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "hang") return undefined;
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "hang") return undefined;
     return defaultRespond(msg, ORIGIN);
   };
   await expectCode(transport.evaluate("hang"), "TRANSPORT_CDP_TIMEOUT");
@@ -326,7 +396,7 @@ test("evaluate times out when the page never answers", async () => {
 test("per-call timeout override is honored", async () => {
   const { transport, socket } = make({ timeoutMs: 5000 });
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "hang") return undefined;
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "hang") return undefined;
     return defaultRespond(msg, ORIGIN);
   };
   const started = Date.now();
@@ -337,7 +407,7 @@ test("per-call timeout override is honored", async () => {
 test("close rejects pending calls and is idempotent", async () => {
   const { transport, socket } = make({ timeoutMs: 5000 });
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "hang") return undefined;
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "hang") return undefined;
     return defaultRespond(msg, ORIGIN);
   };
   const pending = transport.evaluate("hang");
@@ -351,7 +421,7 @@ test("close rejects pending calls and is idempotent", async () => {
 test("browser-side close rejects pending calls", async () => {
   const { transport, socket } = make({ timeoutMs: 5000 });
   socket.respond = (msg) => {
-    if (msg.method === "Runtime.evaluate" && msg.params.expression === "hang") return undefined;
+    if (msg.method === "Runtime.evaluate" && innerExpression(msg.params) === "hang") return undefined;
     return defaultRespond(msg, ORIGIN);
   };
   const pending = transport.evaluate("hang");

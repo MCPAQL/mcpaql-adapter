@@ -17,8 +17,13 @@
  *
  * Security model:
  * - Method allowlist is a constant, checked on every send, covered by test
- * - Origin is checked at discovery AND re-checked before every evaluate
+ * - Origin is checked at discovery AND inside every evaluate, atomically:
+ *   the expression runs only if the page still reports the allowed origin
  * - No `Input.*`, no `Page.navigate`, no file-input methods, ever
+ * - Expressions are adapter-authored, static scripts (the same trust model
+ *   as the AppleScript templates): never caller- or user-supplied. This
+ *   layer bounds what the *transport* can do; what the *scripts* may do is
+ *   enforced separately by the read-only script scan (#44).
  *
  * SPDX-License-Identifier: AGPL-3.0-only
  */
@@ -218,7 +223,16 @@ export async function discoverTargets(
       { status: response.status },
     );
   }
-  const body = await response.json();
+  let body: unknown;
+  try {
+    body = await withTimeout(response.json(), timeoutMs, "discovery body");
+  } catch (err) {
+    if (err instanceof CdpTransportError) throw err;
+    throw new CdpTransportError(
+      "TRANSPORT_CDP_PROTOCOL_ERROR",
+      `DevTools endpoint ${url} returned unreadable JSON: ${describe(err)}`,
+    );
+  }
   if (!Array.isArray(body)) {
     throw new CdpTransportError(
       "TRANSPORT_CDP_PROTOCOL_ERROR",
@@ -255,6 +269,27 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): P
   });
 }
 
+/** Marker key the guarded expression returns when the tab is on another origin. */
+export const ORIGIN_MISMATCH_KEY = "__cdpOriginMismatch";
+
+/**
+ * Wrap an expression so it runs only if the page still reports the allowed
+ * origin. Check and evaluation share one execution context, so a navigation
+ * between them is impossible.
+ */
+export function guardExpression(expression: string, allowedOrigin: string): string {
+  return `(async () => { if (location.origin !== ${JSON.stringify(allowedOrigin)}) ` +
+    `return { ${JSON.stringify(ORIGIN_MISMATCH_KEY)}: location.origin }; ` +
+    `return (${expression}); })()`;
+}
+
+/** The origin a guarded evaluation reported, or null when it ran normally. */
+export function originMismatchOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  return typeof v[ORIGIN_MISMATCH_KEY] === "string" ? (v[ORIGIN_MISMATCH_KEY] as string) : null;
+}
+
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -276,6 +311,7 @@ export class BrowserCdpTransport {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private closed = false;
+  private connecting: Promise<CdpTarget> | null = null;
 
   constructor(config: BrowserCdpConfig, deps: BrowserCdpDeps = {}) {
     if (typeof config.allowedOrigin !== "string" || originOf(config.allowedOrigin) !== config.allowedOrigin) {
@@ -300,9 +336,20 @@ export class BrowserCdpTransport {
     return this.target;
   }
 
-  /** Discover, select, and attach. Idempotent while connected. */
-  async connect(): Promise<CdpTarget> {
-    if (this.socket && this.target && !this.closed) return this.target;
+  /**
+   * Discover, select, and attach. Idempotent while connected; concurrent
+   * callers share one in-flight attempt so only one socket ever exists.
+   */
+  connect(): Promise<CdpTarget> {
+    if (this.socket && this.target && !this.closed) return Promise.resolve(this.target);
+    if (this.connecting) return this.connecting;
+    this.connecting = this.attach().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
+
+  private async attach(): Promise<CdpTarget> {
     this.closed = false;
     const targets = await discoverTargets(
       this.config.host,
@@ -313,24 +360,39 @@ export class BrowserCdpTransport {
     const target = selectTarget(targets, this.config.allowedOrigin);
     const wsUrl = target.webSocketDebuggerUrl as string;
     const socket = this.socketFactory(wsUrl);
-    await withTimeout(
-      new Promise<void>((resolve, reject) => {
-        socket.addEventListener("open", () => resolve());
-        socket.addEventListener("error", (event) => {
-          reject(new CdpTransportError(
-            "TRANSPORT_CDP_DISCONNECTED",
-            `WebSocket to ${wsUrl} failed: ${describe(event)}`,
-          ));
-        });
-      }),
-      this.config.timeoutMs,
-      "attach",
-    );
+    try {
+      await withTimeout(
+        new Promise<void>((resolve, reject) => {
+          socket.addEventListener("open", () => resolve());
+          socket.addEventListener("error", (event) => {
+            reject(new CdpTransportError(
+              "TRANSPORT_CDP_DISCONNECTED",
+              `WebSocket to ${wsUrl} failed: ${describe(event)}`,
+            ));
+          });
+        }),
+        this.config.timeoutMs,
+        "attach",
+      );
+    } catch (err) {
+      // A handshake that failed or is still dangling must not leak a live connection.
+      try {
+        socket.close();
+      } catch {
+        // Nothing further to do for a socket that refuses to close.
+      }
+      throw err;
+    }
     socket.addEventListener("message", (event) => this.onMessage(event.data));
     socket.addEventListener("close", () => this.onClose());
     this.socket = socket;
     this.target = target;
-    await this.send("Runtime.enable", {});
+    try {
+      await this.send("Runtime.enable", {});
+    } catch (err) {
+      this.close();
+      throw err;
+    }
     return target;
   }
 
@@ -338,18 +400,22 @@ export class BrowserCdpTransport {
    * Evaluate a JavaScript expression in the attached tab and return its
    * JSON-serialized value. Promises are awaited. Exceptions in the page
    * become EVALUATE_ERROR; oversize results become RESULT_TOO_LARGE.
+   *
+   * `expression` must be a single expression (an IIFE is fine). It is
+   * wrapped so the origin check and the evaluation happen in the same
+   * execution context: if the tab has navigated away, the expression does
+   * not run and the session is closed.
    */
   async evaluate(expression: string, options: EvaluateOptions = {}): Promise<unknown> {
     if (typeof expression !== "string" || expression.trim() === "") {
       throw new CdpTransportError("TRANSPORT_CDP_EVALUATE_ERROR", "Expression must be a non-empty string.");
     }
     await this.connect();
-    await this.assertStillOnOrigin();
     const timeoutMs = options.timeoutMs ?? this.config.timeoutMs;
     const raw = await this.send(
       "Runtime.evaluate",
       {
-        expression,
+        expression: guardExpression(expression, this.config.allowedOrigin),
         returnByValue: true,
         awaitPromise: true,
         // Never allow the evaluated script to trigger user gestures.
@@ -372,6 +438,15 @@ export class BrowserCdpTransport {
       );
     }
     const value = result.result?.value;
+    const mismatch = originMismatchOf(value);
+    if (mismatch !== null) {
+      this.close();
+      throw new CdpTransportError(
+        "TRANSPORT_CDP_ORIGIN_REFUSED",
+        `Attached tab left ${this.config.allowedOrigin} (now ${mismatch}). Session closed; reconnect once the tab is back.`,
+        { allowedOrigin: this.config.allowedOrigin, currentOrigin: mismatch },
+      );
+    }
     const size = Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
     if (size > this.config.maxResultBytes) {
       throw new CdpTransportError(
@@ -395,28 +470,6 @@ export class BrowserCdpTransport {
       socket?.close();
     } catch {
       // Closing an already-closed socket is not an error we care about.
-    }
-  }
-
-  /**
-   * Re-verify the attached tab is still on the allowed origin by asking
-   * the page itself. Uses the one allowed method, so it stays inside the
-   * allowlist.
-   */
-  private async assertStillOnOrigin(): Promise<void> {
-    const raw = await this.send(
-      "Runtime.evaluate",
-      { expression: "location.origin", returnByValue: true },
-      this.config.timeoutMs,
-    );
-    const origin = (raw as { result?: { value?: unknown } }).result?.value;
-    if (origin !== this.config.allowedOrigin) {
-      this.close();
-      throw new CdpTransportError(
-        "TRANSPORT_CDP_ORIGIN_REFUSED",
-        `Attached tab left ${this.config.allowedOrigin} (now ${String(origin)}). Session closed; reconnect once the tab is back.`,
-        { allowedOrigin: this.config.allowedOrigin, currentOrigin: origin },
-      );
     }
   }
 
