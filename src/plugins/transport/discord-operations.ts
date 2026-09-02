@@ -193,19 +193,19 @@ export function errorEnvelope(err: unknown): OperationFailure {
 
 /**
  * The `{ operation, params }` shape MCP-AQL tools take. Parameters may be
- * nested under `params` or given flat beside `operation`; nested wins.
+ * nested under `params` or given flat beside `operation`; when both are
+ * present they are merged and a nested value wins over a flat one of the
+ * same name, so a partial nested object never discards flat parameters.
  */
 export function resolveOperationArguments(args: unknown): { operation: string; params: Record<string, unknown> } {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return { operation: "", params: {} };
   const a = args as Record<string, unknown>;
   const operation = typeof a.operation === "string" ? a.operation : "";
-  if (typeof a.params === "object" && a.params !== null && !Array.isArray(a.params)) {
-    return { operation, params: a.params as Record<string, unknown> };
-  }
   const flat = { ...a };
   delete flat.operation;
   delete flat.params;
-  return { operation, params: flat };
+  const nested = typeof a.params === "object" && a.params !== null && !Array.isArray(a.params) ? (a.params as Record<string, unknown>) : {};
+  return { operation, params: { ...flat, ...nested } };
 }
 
 /**
@@ -357,6 +357,13 @@ function operationDetails(op: DiscordOperation) {
 /** The `introspect` operation. `version` is the adapter's, reported under `_protocol`. */
 export function buildIntrospection(params: Record<string, unknown>, version: string): OperationResult {
   const query = typeof params.query === "string" ? params.query : undefined;
+  if (params.name !== undefined && params.name !== null && typeof params.name !== "string") {
+    return errorEnvelope(new DiscordOperationError(
+      "VALIDATION_INVALID_TYPE",
+      `Invalid type for parameter 'name' of operation 'introspect': expected string, got ${describeValue(params.name)}.`,
+      { operation: "introspect", param_name: "name", expected: "string", actual: typeof params.name },
+    ));
+  }
   const name = typeof params.name === "string" ? params.name : undefined;
   if (query === "operations") {
     if (name !== undefined) {

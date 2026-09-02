@@ -182,6 +182,7 @@ test("resolveOperationArguments accepts nested params or flat arguments, nested 
   assert.deepEqual(resolveOperationArguments({ operation: "list_dms", params: { limit: 3 } }), { operation: "list_dms", params: { limit: 3 } });
   assert.deepEqual(resolveOperationArguments({ operation: "list_dms", limit: 3 }), { operation: "list_dms", params: { limit: 3 } });
   assert.deepEqual(resolveOperationArguments({ operation: "list_dms", limit: 9, params: { limit: 3 } }), { operation: "list_dms", params: { limit: 3 } });
+  assert.deepEqual(resolveOperationArguments({ operation: "read_messages", channel_id: CH, params: { limit: 10 } }), { operation: "read_messages", params: { channel_id: CH, limit: 10 } });
   assert.deepEqual(resolveOperationArguments(undefined), { operation: "", params: {} });
   assert.deepEqual(resolveOperationArguments({ params: [1] }), { operation: "", params: {} });
 });
@@ -320,6 +321,10 @@ test("introspect lists every operation plus itself, and details one by name", ()
   assert.equal((self as { data: { operation: { name: string } } }).data.operation.name, "introspect");
 
   assert.equal(failure(buildIntrospection({ query: "operations", name: "send_message" }, "0.1.0")).code, "NOT_FOUND_OPERATION");
+  const badName = failure(buildIntrospection({ query: "operations", name: 123 }, "0.1.0"));
+  assert.equal(badName.code, "VALIDATION_INVALID_TYPE");
+  assert.match(badName.message, /'name'/);
+  assert.equal(buildIntrospection({ query: "operations", name: null }, "0.1.0").success, true, "null name means no filter");
 });
 
 test("introspect describes the result types", () => {
