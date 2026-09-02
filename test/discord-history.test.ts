@@ -75,7 +75,10 @@ function fakePage(history: DiscordMessage[], initial: number, perScroll: number,
       return r;
     }
     if (expr.includes("pushState")) { navigated = true; return true; }
-    if (expr.includes('li[id="')) return navigated; // anchored probe: only after navigation
+    if (expr.includes('li[id="')) { // anchored probe: only after navigation, and only if the row exists
+      const anchor = /li\[id="chat-messages-\d+-(\d+)"\]/.exec(expr)?.[1];
+      return navigated && history.some((m) => m.id === anchor);
+    }
     if (expr.includes("chat-messages-")) return true; // plain mounted probe
     throw new Error(`unexpected expression ${expr.slice(0, 40)}`);
   };
@@ -148,6 +151,15 @@ test("a transport error mid-loop returns the partial envelope with a cursor inst
   const r2 = await readMessages(disconnected, { channel_id: CH, limit: 100 });
   assert.equal(r2.stop_reason, "problem");
   assert.equal(r2.count, 20);
+});
+
+test("a resume whose cursor message was deleted falls back to the open channel and still reads older history", async () => {
+  const deleted = msg(60).id; // never in history, so the anchored probe can never match
+  const page = fakePage([...history.slice(0, 60), ...history.slice(61)], 120, 30);
+  const r = await readMessages(deps(page), { channel_id: CH, before: deleted, limit: 10 });
+  assert.equal(r.stop_reason, "filled");
+  assert.equal(r.messages[0].content, "m59");
+  assert.ok(r.messages.every((m) => olderThan(m.id, deleted)));
 });
 
 test("an incomplete stop that returned nothing keeps `before` as the cursor", async () => {

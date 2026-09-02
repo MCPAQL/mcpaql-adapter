@@ -36,7 +36,7 @@ import {
   type DomRoot,
   type ExtractResult,
 } from "./discord-dom.js";
-import { isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
+import { OpenChannelTimeout, isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
 
 /** Selectors observed on discord.com, verified 2026-09-02. */
 export const DISCORD_HISTORY_SELECTORS = {
@@ -303,10 +303,19 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     return all;
   };
 
-  await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
-    timeoutMs: Math.max(1000, Math.min(15_000, budgetLeft())),
-    sleep: deps.sleep,
-  });
+  const openBudget = (): number => Math.max(1000, Math.min(15_000, budgetLeft()));
+  try {
+    await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
+      timeoutMs: openBudget(),
+      sleep: deps.sleep,
+    });
+  } catch (err) {
+    // A cursor whose message was deleted never mounts as a row, but Discord
+    // still navigates to the surrounding history. Fall back to the channel
+    // being open at all and let the loop and the `before` filter do the rest.
+    if (!(err instanceof OpenChannelTimeout) || p.before === null) throw err;
+    await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id }, { timeoutMs: openBudget(), sleep: deps.sleep });
+  }
 
   let noProgressStreak = 0;
   let lastStepGrew = true;
