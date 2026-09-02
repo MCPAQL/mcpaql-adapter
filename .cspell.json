@@ -2,7 +2,11 @@
   "version": "0.2",
   "language": "en",
   "words": [
-    "scroller"
+    "scroller",
+    "CDP",
+    "popstate",
+    "snowflake",
+    "snowflakes"
   ],
   "dictionaries": [
     "project-words"
