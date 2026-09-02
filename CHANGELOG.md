@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Discord `read_messages` right after a navigation: the route changes and the message list mounts before the rows render (observed live through the runnable adapter), so the first extraction reported the channel "not in view" and the read stopped with a problem. The read now polls for up to 3 s after a navigation before reporting that problem; a channel that was already open gets no grace and behaves as before (#38)
+- Discord `read_messages` right after a navigation: the route changes and the message list mounts before the rows render (observed live through the runnable adapter), so the first extraction reported the channel "not in view" and the read stopped with a problem. The read now polls for up to 3 s after a navigation before reporting that problem, and a budget that runs out during that wait is a `time_budget` stop rather than a problem; a channel that was already open gets no grace and behaves as before (#38)
 - Non-zero osascript exit codes are now reported correctly: the transport read `error.status` (only set by sync child_process APIs) instead of `error.code`, so every non-zero exit surfaced as exit code 1
 - Native transport failures no longer surface as an empty message: `TRANSPORT_NATIVE_EXECUTION_ERROR` / `TRANSPORT_NATIVE_TIMEOUT` always name the exit code or signal and elapsed time, truncate oversized stderr, and include a stdout preview when stderr is empty (#32 section C; failure mode observed in adapter-generator#42)
 

@@ -361,7 +361,15 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
         { timeoutMs: Math.max(1, budgetLeft()) },
       )) as ExtractResult;
       if (window.problem !== null && window.count === 0) {
-        if (now() < settleUntil && budgetLeft() > OPEN_SETTLE_POLL_MS) {
+        if (now() < settleUntil) {
+          // Still within the grace period. Running out of budget while the
+          // channel is rendering is a budget stop, not proof of a problem.
+          if (budgetLeft() <= OPEN_SETTLE_POLL_MS) {
+            await sleep(Math.max(0, budgetLeft()));
+            stop = "time_budget";
+            problem = window.problem;
+            break;
+          }
           await sleep(OPEN_SETTLE_POLL_MS);
           continue;
         }

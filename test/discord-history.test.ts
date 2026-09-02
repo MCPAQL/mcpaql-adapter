@@ -321,6 +321,14 @@ test("after a navigation, a channel whose rows have not rendered yet is polled, 
   assert.match(r2.problem ?? "", /not in view/);
   assert.ok(extractions >= 2 && extractions <= 14, `bounded polling, got ${extractions}`);
   assert.ok(clock <= 3500, `grace period is bounded, clock at ${clock}`);
+
+  // A budget that runs out while the channel is still rendering is a budget stop, not a "problem".
+  clock = 0; extractions = 0; mounted = false;
+  const r3 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 1000 });
+  assert.equal(r3.stop_reason, "time_budget");
+  assert.equal(r3.complete, false);
+  assert.match(r3.problem ?? "", /not in view/, "the last observation still travels with the result");
+  assert.ok(clock >= 1000 && clock <= 1300, `slept out the budget, clock at ${clock}`);
 });
 
 test("an extractor problem with no messages surfaces as a problem", async () => {
