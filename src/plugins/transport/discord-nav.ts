@@ -257,6 +257,11 @@ export interface OpenChannelTarget {
   /** Omit or `null` for a direct or group message. */
   guildId?: string | null;
   channelId: string;
+  /**
+   * Optional message to jump to. Discord renders the history around it, so a
+   * caller resuming from a cursor need not scroll from the newest message.
+   */
+  messageId?: string | null;
 }
 
 export interface OpenChannelOptions {
@@ -279,11 +284,16 @@ export interface OpenChannelResult {
 /** Same-origin path for a channel. Only validated snowflakes reach it. */
 export function channelPath(target: OpenChannelTarget): string {
   if (!isSnowflake(target.channelId)) throw new Error(`channelId must be a Discord snowflake (got ${JSON.stringify(target.channelId)})`);
+  let anchor = "";
+  if (target.messageId !== undefined && target.messageId !== null) {
+    if (!isSnowflake(target.messageId)) throw new Error(`messageId must be a Discord snowflake (got ${JSON.stringify(target.messageId)})`);
+    anchor = `/${target.messageId}`;
+  }
   if (target.guildId !== undefined && target.guildId !== null) {
     if (!isSnowflake(target.guildId)) throw new Error(`guildId must be a Discord snowflake (got ${JSON.stringify(target.guildId)})`);
-    return `/channels/${target.guildId}/${target.channelId}`;
+    return `/channels/${target.guildId}/${target.channelId}${anchor}`;
   }
-  return `/channels/@me/${target.channelId}`;
+  return `/channels/@me/${target.channelId}${anchor}`;
 }
 
 /** Expression that reports whether the message list for `channelId` is mounted. */
@@ -295,7 +305,7 @@ export function mountedExpression(channelId: string, selectors: DiscordNavSelect
 
 /** Expression that navigates to a same-origin path. Only `channelPath` output is ever passed. */
 export function navigateExpression(path: string): string {
-  if (!/^\/channels\/(?:@me|\d{15,22})\/\d{15,22}$/.test(path)) throw new Error("navigation path must come from channelPath()");
+  if (!/^\/channels\/(?:@me|\d{15,22})\/\d{15,22}(?:\/\d{15,22})?$/.test(path)) throw new Error("navigation path must come from channelPath()");
   return `(() => { location.assign(${JSON.stringify(path)}); return true; })()`;
 }
 
@@ -317,7 +327,8 @@ export async function openChannel(
   const started = Date.now();
   const mounted = mountedExpression(target.channelId);
 
-  if ((await evaluate(mounted)) === true) {
+  const wantsAnchor = target.messageId !== undefined && target.messageId !== null;
+  if (!wantsAnchor && (await evaluate(mounted)) === true) {
     return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
   }
   try {
