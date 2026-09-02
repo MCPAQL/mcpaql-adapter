@@ -365,9 +365,13 @@ export function scanExpression(expression: string, effects: readonly DeclaredEff
   // Every history call must be the exact shape `navigateExpression` emits, with a
   // literal channel path; any other spelling (single quotes, a variable, a
   // relative segment) is refused rather than validated.
-  const historyCalls = (expression.match(/history\.(?:push|replace)State\(/g) ?? []).length;
+  // Any mention of the mutation methods counts, however reached (dot, bracket,
+  // optional chain, an alias): each must be one of the strict matches.
+  const mentions = (expression.match(/(?:push|replace)State/g) ?? []).length;
   const strict = [...expression.matchAll(/history\.(?:push|replace)State\(\{\}, "", "([^"]*)"\)/g)];
-  if (strict.length !== historyCalls) return "navigates with a shape the guard cannot validate (only history.pushState({}, \"\", \"<literal path>\") is allowed)";
+  if (strict.length !== mentions || /history\s*(?:\[|\?\.)/.test(expression)) {
+    return "navigates with a shape the guard cannot validate (only history.pushState({}, \"\", \"<literal path>\") is allowed)";
+  }
   for (const m of strict) {
     if (!CHANNEL_PATH.test(m[1])) return `navigates to ${JSON.stringify(m[1])}, not a channel path`;
   }

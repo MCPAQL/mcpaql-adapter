@@ -267,6 +267,12 @@ test("the runtime guard refuses an expression that is not read-only for the oper
   assert.match(scanExpression("(() => { history.pushState({}, '', '/channels/@me/1520443442982031486'); })()", ["navigate-same-origin"]) ?? "", /cannot validate/);
   assert.match(scanExpression('(() => { const p = "/channels/@me/1520443442982031486"; history.pushState({}, "", p); })()', ["navigate-same-origin"]) ?? "", /cannot validate/);
   assert.match(scanExpression('(() => { history.replaceState(null, "", "/channels/@me/1520443442982031486"); })()', ["navigate-same-origin"]) ?? "", /cannot validate/);
+  // Indirect access to the mutation methods is refused even with no effect declared.
+  assert.match(scanExpression('(() => { history["pushState"]({}, "", "/settings"); })()', []) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { history?.pushState({}, "", "/settings"); })()', []) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { const h = history; h.pushState({}, "", "/settings"); })()', []) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { const f = history["push" + "State"]; })()', []) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { history[k]({}, "", "/settings"); })()', []) ?? "", /cannot validate/);
   assert.match(scanExpression('(() => { dispatchEvent(new Event("click")); })()', ["navigate-same-origin", "scroll-message-list"]) ?? "", /"click" event/);
   assert.match(scanExpression('(() => { const t = "popstate"; dispatchEvent(new PopStateEvent(t)); })()', ["navigate-same-origin"]) ?? "", /not an inline literal/);
   assert.match(scanExpression('(() => { dispatchEvent(new PopStateEvent("popstate")); })()', ["scroll-message-list"]) ?? "", /without declaring navigate-same-origin/);
