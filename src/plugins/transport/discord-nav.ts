@@ -303,8 +303,14 @@ export function channelPath(target: OpenChannelTarget): string {
  * mounted and either holds one of its rows or the location names the
  * channel (an empty channel has a list with no rows).
  */
-export function mountedExpression(channelId: string, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
+export function mountedExpression(channelId: string, anchorMessageId: string | null = null, selectors: DiscordNavSelectors = DISCORD_NAV_SELECTORS): string {
   if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
+  if (anchorMessageId !== null) {
+    // Resuming at an anchor: the channel's stale rows do not count. Only the anchored row itself does.
+    if (!isSnowflake(anchorMessageId)) throw new Error("anchorMessageId must be a Discord snowflake");
+    return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
+      `return l.querySelector('li[id="${selectors.messageRowPrefix}${channelId}-${anchorMessageId}"]') !== null; })()`;
+  }
   return `(() => { const l = document.querySelector(${JSON.stringify(selectors.messageList)}); if (l === null) return false; ` +
     `if (l.querySelector('li[id^="${selectors.messageRowPrefix}${channelId}-"]') !== null) return true; ` +
     `return /^\\/channels\\/(?:@me|\\d+)\\/${channelId}(?:\\/|$)/.test(location.pathname); })()`;
@@ -339,7 +345,7 @@ export async function openChannel(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const path = channelPath(target);
   const started = Date.now();
-  const mounted = mountedExpression(target.channelId);
+  const mounted = mountedExpression(target.channelId, target.messageId ?? null);
 
   // Every evaluate and every sleep is bounded by what actually remains of the
   // total budget, so a hung page cannot stretch the op past `timeoutMs`, and
@@ -350,9 +356,9 @@ export async function openChannel(
     if (left <= 0) throw new OpenChannelTimeout(target.channelId, timeoutMs, path);
     return run(left);
   };
-  // With an anchor, always navigate: the mounted check cannot tell where the window is.
-  const wantsAnchor = target.messageId !== undefined && target.messageId !== null;
-  if (!wantsAnchor && (await budgeted((t) => evaluate(mounted, { timeoutMs: t }))) === true) {
+  // With an anchor, the probe requires the anchored row itself, so a channel
+  // that is open on a stale window still navigates.
+  if ((await budgeted((t) => evaluate(mounted, { timeoutMs: t }))) === true) {
     return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
   }
   try {
