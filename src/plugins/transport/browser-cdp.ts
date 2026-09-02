@@ -236,6 +236,8 @@ export async function discoverTargets(
   timeoutMs: number,
 ): Promise<CdpTarget[]> {
   const url = `http://${devtoolsAuthority(host, port)}/json/list`;
+  // One deadline for the whole discovery: the request and the body read share `timeoutMs`.
+  const deadline = Date.now() + timeoutMs;
   let response: Awaited<ReturnType<FetchLike>>;
   try {
     response = await withTimeout(fetchImpl(url), timeoutMs, "discovery");
@@ -256,7 +258,7 @@ export async function discoverTargets(
   }
   let body: unknown;
   try {
-    body = await withTimeout(response.json(), timeoutMs, "discovery body");
+    body = await withTimeout(response.json(), Math.max(1, deadline - Date.now()), "discovery body");
   } catch (err) {
     if (err instanceof CdpTransportError) throw err;
     throw new CdpTransportError(
