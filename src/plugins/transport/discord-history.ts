@@ -361,7 +361,8 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
         { timeoutMs: Math.max(1, budgetLeft()) },
       )) as ExtractResult;
       if (window.problem !== null && window.count === 0) {
-        if (now() < settleUntil) {
+        // Only a rendering delay gets the grace period; a cap failure (truncated) is permanent and named below.
+        if (now() < settleUntil && !window.truncated) {
           // Still within the grace period. Running out of budget while the
           // channel is rendering is a budget stop, not proof of a problem.
           if (budgetLeft() <= OPEN_SETTLE_POLL_MS) {
