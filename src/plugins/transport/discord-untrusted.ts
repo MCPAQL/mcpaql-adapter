@@ -31,14 +31,19 @@ export type UntrustedField =
   | "embed.url"
   | "attachment.filename"
   | "attachment.url"
-  | "channel.label";
+  | "channel.label"
+  | "listing.name"
+  | "listing.category"
+  | "listing.raw_label";
 
 export interface UntrustedFlag {
-  /** Null for flags on the channel itself. */
+  /** Null for flags on the channel itself and for listing items (which carry `item_id`). */
   message_id: string | null;
   field: UntrustedField;
-  /** Index within links/reactions/embeds/attachments, when the field is one of those. */
+  /** Index within links/reactions/embeds/attachments, or the item's position in a listing. */
   index: number | null;
+  /** The listed conversation, server, or channel a `listing.*` flag is about. */
+  item_id?: string;
   severity: SecuritySeverity;
   patterns: string[];
 }
@@ -181,4 +186,43 @@ export function classifyChannelLabel(label: string | null, options: ClassifyOpti
   const flag: UntrustedFlag = { message_id: null, field: "channel.label", index: null, severity: hit.severity, patterns: hit.patterns };
   const masked = (options.redact ?? false) && SEVERITY_RANK[hit.severity] >= SEVERITY_RANK.high;
   return { flag, label: masked ? REDACTED : label };
+}
+
+/** The string fields of a listing item that other people control, in the order they are scanned. */
+export const LISTING_FIELDS = ["name", "category", "raw_label"] as const;
+export type ListingField = (typeof LISTING_FIELDS)[number];
+
+export interface ClassifyListingResult<T> {
+  items: T[];
+  flags: UntrustedFlag[];
+  /** Ids of items with at least one flag. */
+  flagged_ids: string[];
+  highest_severity: SecuritySeverity | null;
+}
+
+/**
+ * Classify the names in a listing (conversations, servers, channels). A
+ * group DM's members, a server's owner, and a channel's moderators all
+ * choose those names, so they are as untrusted as message text. Pure:
+ * returns new item objects, never mutates the input.
+ */
+export function classifyListingItems<T extends { id: string }>(items: readonly T[], options: ClassifyOptions = {}): ClassifyListingResult<T> {
+  const redact = options.redact ?? false;
+  const maxFieldLength = Math.min(VALIDATOR_MAX_LENGTH, Math.max(1, Math.floor(options.maxFieldLength ?? DEFAULT_MAX_FIELD_LENGTH)));
+  const flags: UntrustedFlag[] = [];
+  let highest: SecuritySeverity | null = null;
+  const out = items.map((item, index) => {
+    const copy: Record<string, unknown> = { ...item };
+    for (const field of LISTING_FIELDS) {
+      const value = copy[field];
+      if (typeof value !== "string") continue;
+      const hit = scan(value, maxFieldLength);
+      if (!hit) continue;
+      flags.push({ message_id: null, item_id: item.id, field: `listing.${field}`, index, severity: hit.severity, patterns: hit.patterns });
+      if (highest === null || SEVERITY_RANK[hit.severity] > SEVERITY_RANK[highest]) highest = hit.severity;
+      if (redact && SEVERITY_RANK[hit.severity] >= SEVERITY_RANK.high) copy[field] = REDACTED;
+    }
+    return copy as T;
+  });
+  return { items: out, flags, flagged_ids: [...new Set(flags.map((f) => f.item_id).filter((id): id is string => id !== undefined))], highest_severity: highest };
 }
