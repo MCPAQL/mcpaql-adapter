@@ -325,6 +325,9 @@ test("introspect lists every operation plus itself, and details one by name", ()
   assert.equal(badName.code, "VALIDATION_INVALID_TYPE");
   assert.match(badName.message, /'name'/);
   assert.equal(buildIntrospection({ query: "operations", name: null }, "0.1.0").success, true, "null name means no filter");
+  const misspelled = failure(buildIntrospection({ query: "operations", nmae: "read_messages" }, "0.1.0"));
+  assert.equal(misspelled.code, "VALIDATION_UNKNOWN_PARAM");
+  assert.deepEqual(misspelled.details?.unknown_params, ["nmae"]);
 });
 
 test("introspect describes the result types", () => {

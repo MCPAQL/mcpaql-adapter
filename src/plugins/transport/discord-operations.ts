@@ -355,7 +355,17 @@ function operationDetails(op: DiscordOperation) {
 }
 
 /** The `introspect` operation. `version` is the adapter's, reported under `_protocol`. */
+const INTROSPECT_PARAMS: ReadonlySet<string> = new Set(INTROSPECT_DETAILS.parameters.map((p) => p.name));
+
 export function buildIntrospection(params: Record<string, unknown>, version: string): OperationResult {
+  const unknown = Object.keys(params).filter((k) => !INTROSPECT_PARAMS.has(k));
+  if (unknown.length > 0) {
+    return errorEnvelope(new DiscordOperationError(
+      "VALIDATION_UNKNOWN_PARAM",
+      `Operation 'introspect' does not accept parameter(s) '${unknown.join("', '")}'. It takes 'query' and 'name'.`,
+      { operation: "introspect", unknown_params: unknown },
+    ));
+  }
   const query = typeof params.query === "string" ? params.query : undefined;
   if (params.name !== undefined && params.name !== null && typeof params.name !== "string") {
     return errorEnvelope(new DiscordOperationError(
