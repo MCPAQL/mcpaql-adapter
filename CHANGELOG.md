@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Discord untrusted-content classification (`src/plugins/transport/discord-untrusted.ts`) — the other half of #44
+  - `readMessages` runs its result through the classifier: `flags`, `flagged_ids`, and `highest_severity` travel with every read; `redact` is an opt-in parameter
   - `classifyDiscordMessages` runs every text field (content, author, reply label, embed title/description/provider, attachment filename) through the `@mcpaql/security` content validator and reports flags per message and per field with severity and pattern names; nothing is changed unless `redact` is set, and then only `high`/`critical` fields; input is never mutated; oversize fields are flagged rather than scanned
 - Discord page-script registry and read-only scan (`src/plugins/transport/discord-scripts.ts`, `test/discord-read-only.test.ts`) — part of #44 for the read-only Discord adapter (#38)
   - Every script the adapter evaluates in the page is registered with the side effects it declares (`navigate-same-origin`, `scroll-message-list`); a test fails if a function marked SELF-CONTAINED in a Discord module is missing from the registry

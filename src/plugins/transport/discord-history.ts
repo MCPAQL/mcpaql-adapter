@@ -36,6 +36,8 @@ import {
   type ExtractResult,
 } from "./discord-dom.js";
 import { isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
+import { classifyDiscordMessages, type UntrustedFlag } from "./discord-untrusted.js";
+import type { SecuritySeverity } from "../../security/types.js";
 
 /** Selectors observed on discord.com, verified 2026-09-02. */
 export const DISCORD_HISTORY_SELECTORS = {
@@ -192,6 +194,12 @@ export interface ReadMessagesParams {
   time_budget_ms?: number;
   /** Bytes allowed per in-page extraction. @default 4 MiB */
   window_max_bytes?: number;
+  /**
+   * Replace `high`/`critical` untrusted-content findings with the security
+   * validator's sanitized text. Off by default: the flags are always
+   * reported; the text is left for the reader to judge.
+   */
+  redact?: boolean;
 }
 
 export interface ReadMessagesResult {
@@ -211,6 +219,14 @@ export interface ReadMessagesResult {
   stop_reason: "filled" | "beginning" | "scan_cap" | "time_budget" | "no_growth" | "problem";
   problem: string | null;
   elapsed_ms: number;
+  /**
+   * Untrusted-content findings from the security validator, per message and
+   * per field. Discord content was written by other people; these travel
+   * with the result so nothing is silently laundered.
+   */
+  flags: UntrustedFlag[];
+  flagged_ids: string[];
+  highest_severity: SecuritySeverity | null;
 }
 
 export interface ReadMessagesDeps {
@@ -235,7 +251,7 @@ export function olderThan(id: string, cursor: string): boolean {
   return BigInt(id) < BigInt(cursor);
 }
 
-function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams, "guild_id" | "before">> & { guild_id: string | null; before: string | null } {
+function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams, "guild_id" | "before" | "redact">> & { guild_id: string | null; before: string | null; redact: boolean } {
   if (!isSnowflake(p.channel_id)) throw new Error("channel_id must be a Discord snowflake");
   if (p.guild_id !== undefined && p.guild_id !== null && !isSnowflake(p.guild_id)) throw new Error("guild_id must be a Discord snowflake");
   if (p.before !== undefined && p.before !== null && !isSnowflake(p.before)) throw new Error("before must be a Discord message id");
@@ -247,6 +263,7 @@ function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams,
     scan_cap: Math.max(1, Math.floor(p.scan_cap ?? DEFAULTS.scan_cap)),
     time_budget_ms: Math.max(1000, Math.floor(p.time_budget_ms ?? DEFAULTS.time_budget_ms)),
     window_max_bytes: Math.max(64 * 1024, Math.floor(p.window_max_bytes ?? DEFAULTS.window_max_bytes)),
+    redact: p.redact === true,
   };
 }
 
@@ -341,7 +358,8 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     }
   }
 
-  const messages = wanted().slice(0, p.limit);
+  const classified = classifyDiscordMessages(wanted().slice(0, p.limit), { redact: p.redact });
+  const messages = classified.messages;
   const complete = stop === "filled" || stop === "beginning";
   return {
     channel: { id: p.channel_id, label },
@@ -354,5 +372,8 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     stop_reason: stop ?? "problem",
     problem,
     elapsed_ms: now() - started,
+    flags: classified.flags,
+    flagged_ids: classified.flagged_ids,
+    highest_severity: classified.highest_severity,
   };
 }
