@@ -66,6 +66,7 @@ function fakePage(history: DiscordMessage[], initial: number, perScroll: number,
     calls.push(expr);
     budgets.push(o?.timeoutMs);
     if (expr.startsWith("EXTRACT")) return windowOf(history.slice(top, top + mounted));
+    if (expr.startsWith("COUNT")) return { count: mounted, oldestId: null, moreAbove: top > 0, problem: null };
     if (expr.startsWith("SCROLL")) {
       const before = mounted;
       const grow = Math.min(perScroll, top);
@@ -89,6 +90,7 @@ const deps = (page: ReturnType<typeof fakePage>) => ({
   evaluate: page.evaluate,
   sleep: async () => {},
   extractExpression: () => "EXTRACT",
+  mountedCountExpression: () => "COUNT",
   scrollStep: (ev: (e: string) => Promise<unknown>) => ev("SCROLL") as Promise<ScrollStepOutcome>,
 });
 
@@ -286,70 +288,88 @@ test("no growth despite a loading placeholder stops after three tries, never spi
   assert.equal(page.calls.filter((c) => c === "SCROLL").length, 3);
 });
 
-test("after a navigation, a channel whose rows have not rendered yet is polled, not reported as a problem", async () => {
-  // Observed live: the route changes and the list mounts before the rows do, so the
-  // first extraction says "not in view". A channel that was already open gets no grace.
-  let clock = 0;
-  const now = (): number => clock;
-  const sleep = async (ms: number): Promise<void> => { clock += ms; };
-  let mounted = false;
-  let extractions = 0;
-  const evaluate = async (expr: string): Promise<unknown> => {
-    if (expr.includes("history.pushState")) { mounted = true; return true; }
-    if (expr === "EXTRACT") {
-      extractions++;
-      return extractions < 3 ? windowOf([], `Channel ${CH} is not in view. Open it in Discord and retry.`) : windowOf(history.slice(100));
-    }
-    if (expr.includes("chat-messages-")) return mounted; // mounted probe: false until navigated
-    throw new Error(`unexpected ${expr.slice(0, 40)}`);
-  };
-  const r = await readMessages({ evaluate, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10 });
+test("after a navigation, rows are awaited through the row probe; an already-open channel gets no wait", async () => {
+  // Observed live: the route changes and the list mounts before the rows do.
+  // A settling page: `open` flips on navigation; rows appear after `rowsAfterProbes` probes.
+  function settlingPage(opts: { open: boolean; rowsAfterProbes: number; extract?: () => ExtractResult }) {
+    let clock = 0;
+    let mounted = opts.open;
+    let probes = 0;
+    let extractions = 0;
+    const evaluate = async (expr: string): Promise<unknown> => {
+      if (expr.includes("history.pushState")) { mounted = true; return true; }
+      if (expr === "COUNT") { probes++; return { count: probes >= opts.rowsAfterProbes ? 20 : 0, oldestId: null, moreAbove: false, problem: null }; }
+      if (expr === "EXTRACT") { extractions++; return opts.extract ? opts.extract() : windowOf(history.slice(100)); }
+      if (expr.includes("chat-messages-")) return mounted; // mounted probe: false until navigated
+      throw new Error(`unexpected ${expr.slice(0, 40)}`);
+    };
+    const d = { evaluate, now: () => clock, sleep: async (ms: number) => { clock += ms; }, extractExpression: () => "EXTRACT", mountedCountExpression: () => "COUNT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) };
+    return { deps: d, get probes() { return probes; }, get extractions() { return extractions; }, get clock() { return clock; } };
+  }
+
+  const settling = settlingPage({ open: false, rowsAfterProbes: 3 });
+  const r = await readMessages(settling.deps, { channel_id: CH, limit: 10 });
   assert.equal(r.stop_reason, "filled");
   assert.equal(r.count, 10);
-  assert.equal(extractions, 3, "two settle polls, then rows");
+  assert.equal(settling.probes, 3, "two empty probes, then rows");
+  assert.equal(settling.extractions, 1, "the extractor runs once rows are there, never as a poll");
+  assert.equal(settling.clock, 750, "openChannel's one 250 ms poll after the push, then two 250 ms settle polls");
 
-  // Rows that never arrive within the grace period are still a named problem, bounded by the clock.
-  clock = 0; extractions = 0; mounted = false;
-  const never = async (expr: string): Promise<unknown> => {
-    if (expr.includes("history.pushState")) { mounted = true; return true; }
-    if (expr === "EXTRACT") { extractions++; return windowOf([], `Channel ${CH} is not in view. Open it in Discord and retry.`); }
-    if (expr.includes("chat-messages-")) return mounted;
+  const open = settlingPage({ open: true, rowsAfterProbes: 99 });
+  const r2 = await readMessages(open.deps, { channel_id: CH, limit: 10 });
+  assert.equal(r2.stop_reason, "filled");
+  assert.equal(open.probes, 0, "already open: no wait at all");
+  assert.equal(open.clock, 0);
+
+  // Rows that never arrive: the wait ends at the bound and the extractor's own problem is reported.
+  const never = settlingPage({ open: false, rowsAfterProbes: 99, extract: () => windowOf([], `Channel ${CH} is not in view. Open it in Discord and retry.`) });
+  const r3 = await readMessages(never.deps, { channel_id: CH, limit: 10 });
+  assert.equal(r3.stop_reason, "problem");
+  assert.match(r3.problem ?? "", /not in view/);
+  assert.equal(never.extractions, 1);
+  assert.ok(never.clock >= 3000 && never.clock <= 3250, `bounded wait, clock at ${never.clock}`);
+
+  // Budget that runs out while still rendering: a time_budget stop, no dead sleep, no starved extraction.
+  const short = settlingPage({ open: false, rowsAfterProbes: 99 });
+  const r4 = await readMessages(short.deps, { channel_id: CH, limit: 10, time_budget_ms: 1000 });
+  assert.equal(r4.stop_reason, "time_budget");
+  assert.equal(r4.complete, false);
+  assert.match(r4.problem ?? "", /still rendering/);
+  assert.equal(short.extractions, 0);
+  assert.ok(short.clock < 1000, `stopped before the budget, clock at ${short.clock}`);
+
+  // A cap failure once rows are there is named at once.
+  const capped = settlingPage({ open: false, rowsAfterProbes: 1, extract: () => ({ ...windowOf([], "A single message exceeds the byte cap."), truncated: true }) });
+  const r5 = await readMessages(capped.deps, { channel_id: CH, limit: 10 });
+  assert.equal(r5.stop_reason, "problem");
+  assert.match(r5.problem ?? "", /byte cap/);
+  assert.equal(capped.extractions, 1);
+
+  // The cursor fallback navigated too, so it waits as well.
+  let clock = 0; let probes = 0;
+  const fallback = async (expr: string): Promise<unknown> => {
+    if (expr.includes("history.pushState")) return true;
+    if (expr === "COUNT") { probes++; return { count: probes >= 2 ? 20 : 0, oldestId: null, moreAbove: false, problem: null }; }
+    if (expr === "EXTRACT") return windowOf(history.slice(100));
+    if (expr.includes('li[id="chat-messages-')) return false; // anchored probe: the cursor row never mounts
+    if (expr.includes("chat-messages-")) return true; // plain probe: open by pathname
     throw new Error(`unexpected ${expr.slice(0, 40)}`);
   };
-  const r2 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10 });
-  assert.equal(r2.stop_reason, "problem");
-  assert.match(r2.problem ?? "", /not in view/);
-  assert.ok(extractions >= 2 && extractions <= 14, `bounded polling, got ${extractions}`);
-  assert.ok(clock <= 3500, `grace period is bounded, clock at ${clock}`);
-
-  // A cap failure right after navigation is permanent: named at once, never polled.
-  clock = 0; mounted = false; let capExtractions = 0;
-  const capped = async (expr: string): Promise<unknown> => {
-    if (expr.includes("history.pushState")) { mounted = true; return true; }
-    if (expr === "EXTRACT") { capExtractions++; return { ...windowOf([], "A single message exceeds the byte cap."), truncated: true }; }
-    if (expr.includes("chat-messages-")) return mounted;
-    throw new Error(`unexpected ${expr.slice(0, 40)}`);
-  };
-  const r4 = await readMessages({ evaluate: capped, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 2000 });
-  assert.equal(r4.stop_reason, "problem");
-  assert.match(r4.problem ?? "", /byte cap/, "the extractor's own named problem, untouched");
-  assert.equal(capExtractions, 1);
-
-  // A budget that runs out while the channel is still rendering is a budget stop, not a "problem".
-  clock = 0; extractions = 0; mounted = false;
-  const r3 = await readMessages({ evaluate: never, now, sleep, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 10, time_budget_ms: 1000 });
-  assert.equal(r3.stop_reason, "time_budget");
-  assert.equal(r3.complete, false);
-  assert.match(r3.problem ?? "", /not in view/, "the last observation still travels with the result");
-  assert.ok(clock >= 1000 && clock <= 1300, `slept out the budget, clock at ${clock}`);
+  const r6 = await readMessages({ evaluate: fallback, now: () => clock, sleep: async (ms) => { clock += ms; }, extractExpression: () => "EXTRACT", mountedCountExpression: () => "COUNT", scrollStep: async () => ({ before: 20, after: 20, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH, limit: 5, before: history[110].id });
+  assert.equal(r6.stop_reason, "filled");
+  assert.equal(probes, 2, "the fallback path waited for rows");
 });
 
 test("an extractor problem with no messages surfaces as a problem", async () => {
+  let extractions = 0;
   const evaluate = async (expr: string): Promise<unknown> => {
-    if (expr === "EXTRACT") return windowOf([], "More than one message list is mounted");
+    if (expr === "EXTRACT") { extractions++; return windowOf([], "More than one message list is mounted"); }
     return true;
   };
-  const r = await readMessages({ evaluate, sleep: async () => {}, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH });
+  let clock = 0;
+  const r = await readMessages({ evaluate, now: () => clock, sleep: async (ms) => { clock += ms; }, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, grew: false, moreAbove: false, problem: null }) }, { channel_id: CH });
+  assert.equal(extractions, 1, "already open: reported at once, never polled");
+  assert.equal(clock, 0);
   assert.equal(r.stop_reason, "problem");
   assert.match(r.problem ?? "", /More than one/);
   assert.equal(r.count, 0);

@@ -255,6 +255,9 @@ export function buildListExpression(
 /** The one thing `openChannel` needs from a transport. */
 export type Evaluate = (expression: string, options?: { timeoutMs?: number }) => Promise<unknown>;
 
+/** The one real sleep every Discord wait loop uses; tests inject a clock instead. */
+export const defaultSleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+
 export interface OpenChannelTarget {
   /** Omit or `null` for a direct or group message. */
   guildId?: string | null;
@@ -342,7 +345,7 @@ export async function openChannel(
 ): Promise<OpenChannelResult> {
   const timeoutMs = options.timeoutMs ?? 15_000;
   const pollMs = options.pollMs ?? 250;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = options.sleep ?? defaultSleep;
   const path = channelPath(target);
   const started = Date.now();
   const mounted = mountedExpression(target.channelId, target.messageId ?? null);

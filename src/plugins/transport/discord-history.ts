@@ -36,7 +36,7 @@ import {
   type DomRoot,
   type ExtractResult,
 } from "./discord-dom.js";
-import { OpenChannelTimeout, isSnowflake, openChannel, type Evaluate, type OpenChannelResult } from "./discord-nav.js";
+import { OpenChannelTimeout, defaultSleep, isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
 import { classifyChannelLabel, classifyDiscordMessages, type UntrustedFlag } from "./discord-untrusted.js";
 import type { SecuritySeverity } from "../../security/types.js";
 
@@ -177,7 +177,7 @@ export interface ScrollStepOutcome {
 export async function scrollStep(evaluate: Evaluate, channelId: string, options: ScrollStepOptions = {}): Promise<ScrollStepOutcome> {
   const growWaitMs = options.growWaitMs ?? 3000;
   const pollMs = options.pollMs ?? 300;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = options.sleep ?? defaultSleep;
   const now = options.now ?? Date.now;
   const started = now();
   const left = (): number => Math.max(1, growWaitMs - (now() - started));
@@ -241,6 +241,7 @@ export interface ReadMessagesResult {
   truncated: boolean;
   /** Why the op stopped. */
   stop_reason: "filled" | "beginning" | "scan_cap" | "time_budget" | "no_growth" | "problem";
+  /** The named problem for a `problem` stop; for a `time_budget` stop, what was still pending when the budget ran out, when anything was. */
   problem: string | null;
   elapsed_ms: number;
   /**
@@ -260,17 +261,19 @@ export interface ReadMessagesDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Override the in-page expressions (tests). */
   extractExpression?: (channelId: string, maxBytes: number) => string;
+  mountedCountExpression?: (channelId: string) => string;
   scrollStep?: (evaluate: Evaluate, growWaitMs: number) => Promise<ScrollStepOutcome>;
 }
 
 /** Longest a single scroll step may wait for Discord to prepend rows. */
 const STEP_GROW_WAIT_MS = 3000;
 /**
- * After a navigation, how long the first extraction may keep finding the
- * channel "not in view" before that is reported as a problem. The route
- * changes before the rows render (observed live: the location matched, the
- * list existed, the rows arrived a moment later), so an immediate extraction
- * can miss a channel that is in fact opening.
+ * After a navigation in this call, how long to wait for the channel's rows
+ * to mount before extracting. The route changes before the rows render
+ * (observed live: the location matched, the list existed, the rows arrived
+ * a moment later), so an immediate extraction can miss a channel that is in
+ * fact opening. The wait polls the small row-count probe, not the extractor,
+ * and ends the moment a row is seen.
  */
 const OPEN_SETTLE_MS = 3000;
 const OPEN_SETTLE_POLL_MS = 250;
@@ -310,12 +313,13 @@ function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams,
 export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesParams): Promise<ReadMessagesResult> {
   const p = resolveParams(params);
   const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = deps.sleep ?? defaultSleep;
   const started = now();
   const budgetLeft = (): number => p.time_budget_ms - (now() - started);
   const extractExpr = deps.extractExpression
     ?? ((channelId: string, maxBytes: number) => buildExtractMessagesExpression({ channelId, maxBytes, maxMessages: WINDOW_MAX_MESSAGES }, DISCORD_SELECTORS));
   const step = deps.scrollStep ?? ((ev: Evaluate, growWaitMs: number) => scrollStep(ev, p.channel_id, { sleep: deps.sleep, now: deps.now, growWaitMs }));
+  const countExpr = deps.mountedCountExpression ?? ((channelId: string) => buildMountedCountExpression(channelId));
 
   const seen = new Map<string, DiscordMessage>();
   let label: string | null = null;
@@ -331,21 +335,25 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   };
 
   const openBudget = (): number => Math.max(1000, Math.min(15_000, budgetLeft()));
-  let opened: OpenChannelResult;
+  // Whether this call changed the route. A channel that was already open is
+  // fully rendered; one we navigated to (including through the cursor
+  // fallback below, whose second probe passes on the pathname alone) may
+  // still be rendering its rows.
+  let navigated: boolean;
   try {
-    opened = await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
+    navigated = !(await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
       timeoutMs: openBudget(),
       sleep: deps.sleep,
-    });
+    })).alreadyOpen;
   } catch (err) {
     // A cursor whose message was deleted never mounts as a row, but Discord
     // still navigates to the surrounding history. Fall back to the channel
     // being open at all and let the loop and the `before` filter do the rest.
     if (!(err instanceof OpenChannelTimeout) || p.before === null) throw err;
-    opened = await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id }, { timeoutMs: openBudget(), sleep: deps.sleep });
+    await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id }, { timeoutMs: openBudget(), sleep: deps.sleep });
+    navigated = true;
   }
-  // A channel that was already open is fully rendered; one we just navigated to may still be rendering its rows.
-  const settleUntil = opened.alreadyOpen ? 0 : now() + OPEN_SETTLE_MS;
+  let settleUntil = navigated ? now() + OPEN_SETTLE_MS : 0;
 
   let noProgressStreak = 0;
   let lastStepGrew = true;
@@ -356,24 +364,26 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   try {
     while (stop === null) {
       if (budgetLeft() <= 0) { stop = "time_budget"; break; }
+      if (now() < settleUntil) {
+        // Rows not yet seen after our navigation: ask the small probe, not the extractor.
+        const probe = (await deps.evaluate(countExpr(p.channel_id), { timeoutMs: Math.max(1, budgetLeft()) })) as ScrollStepResult;
+        if (probe.problem === null && probe.count > 0) {
+          settleUntil = 0; // rendered; never wait again in this call
+        } else if (budgetLeft() <= OPEN_SETTLE_POLL_MS + MIN_STEP_MS) {
+          // Not enough budget for another poll and an extraction: a budget stop, not proof of a problem.
+          stop = "time_budget";
+          problem = `Channel ${p.channel_id} was still rendering when the time budget ran out; raise time_budget_ms and retry.`;
+          break;
+        } else {
+          await sleep(OPEN_SETTLE_POLL_MS);
+          continue;
+        }
+      }
       const window = (await deps.evaluate(
         extractExpr(p.channel_id, p.window_max_bytes),
         { timeoutMs: Math.max(1, budgetLeft()) },
       )) as ExtractResult;
       if (window.problem !== null && window.count === 0) {
-        // Only a rendering delay gets the grace period; a cap failure (truncated) is permanent and named below.
-        if (now() < settleUntil && !window.truncated) {
-          // Still within the grace period. Running out of budget while the
-          // channel is rendering is a budget stop, not proof of a problem.
-          if (budgetLeft() <= OPEN_SETTLE_POLL_MS) {
-            await sleep(Math.max(0, budgetLeft()));
-            stop = "time_budget";
-            problem = window.problem;
-            break;
-          }
-          await sleep(OPEN_SETTLE_POLL_MS);
-          continue;
-        }
         stop = "problem";
         problem = window.problem;
         break;
