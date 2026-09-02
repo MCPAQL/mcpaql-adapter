@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Discord adapter configuration (`src/plugins/transport/discord-config.ts`) — part of #52 for the read-only Discord adapter (#38)
   - `resolveDiscordConfig(env)` reads `MCPAQL_CDP_HOST`, `MCPAQL_CDP_PORT`, and `MCPAQL_CDP_TIMEOUT_MS` into the transport's settings, pinned to `https://discord.com`; unset means the default, but a set value that is invalid is refused by name rather than silently falling back, and only loopback hosts are accepted
-  - `probeDiscordPort` checks the DevTools port once at startup and reports a closed port with both launch commands; it never throws, so the server starts either way and every call returns the same named error until Chrome is up
+  - `probeDiscordPort` checks the DevTools port once at startup, bounded by its own 3 s timeout, and reports a closed port with both launch commands, or an open port with the transport's own reason when no Discord tab is attachable; it never throws for a transport failure, so the server starts either way and every call returns the same named error until Chrome is up
+  - Transport (`browser-cdp.ts`): `launchHint` prints both flags Chrome 136+ requires, `--remote-debugging-port` and `--user-data-dir` (default `$HOME/.mcpaql/chrome-debug`, the same directory the guide uses, checked by a test), with `open -n` on macOS so a running Chrome does not swallow the flags; the transport refuses a non-loopback host in its constructor; IPv6 loopback is bracketed in the discovery URL
 
 - Discord adapter guide (`docs/guides/discord-adapter.md`) — closes #45 for the read-only Discord adapter (#38): the library-only status (the runnable server is #52), what it is and is not, the Chrome setup including the separate profile Chrome 136+ requires, the one side effect, the Discord terms note, the functions and result shapes as they exist, untrusted-content handling, and where to look when Discord changes its markup
 - Discord untrusted-content classification (`src/plugins/transport/discord-untrusted.ts`) — the other half of #44
@@ -101,7 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `launchHint` now prints both flags Chrome 136+ requires, `--remote-debugging-port` and `--user-data-dir` (default `$HOME/.mcpaql/chrome-debug`), for macOS and Linux, and says the profile is separate and needs its own sign-in; it is the text of every `TRANSPORT_CDP_PORT_CLOSED` message
 - **Breaking:** Apple Mail scan templates (`list_messages`, `search_messages`) return the paging envelope instead of a bare array, iterate by index with one `properties()` Apple Event per message, and never call `messages()`, `messages.length`, or non-id `whose` — the enumeration paths that timed out on 100k-message mailboxes (#26, #32 section A). Enforced by a template-source test.
 - **Breaking:** `list_mailboxes` no longer reports `message_count` (it required `messages.length` per mailbox, which fails for accounts containing one large mailbox); `unread_count` remains
 - CI test job runs on Node 24 (was 22) so the `node:sqlite`-backed cache tests execute unflagged
