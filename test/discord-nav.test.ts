@@ -72,10 +72,11 @@ function guildItem(itemId: string, hidden: string): FakeNode {
 function guildRail(): FakeNode {
   return el("div", { "data-list-id": "guildsnav", role: "tree" },
     guildItem("guildsnav___home", "Direct Messages"),
-    guildItem(`guildsnav___${G}`, "Unread mentions, Sundai"),
+    guildItem(`guildsnav___${G}`, "Unread messages, Sundai"),
     guildItem("guildsnav___1210290974601773057", "Dollhouse MCP"),
     guildItem("guildsnav___folder-abc", "Folder"),
-    guildItem("guildsnav___1210290974601773058", "3 unread, Postman"),
+    guildItem("guildsnav___1210290974601773058", "23 mentions, Postman"),
+    guildItem("guildsnav___1210290974601773059", "1 mention, LM Studio"),
   );
 }
 
@@ -140,8 +141,9 @@ test("listGuilds skips home and folders, strips unread prefixes, keeps the raw l
     [G, "Sundai"],
     ["1210290974601773057", "Dollhouse MCP"],
     ["1210290974601773058", "Postman"],
+    ["1210290974601773059", "LM Studio"],
   ]);
-  assert.equal(r.items[0].raw_label, "Unread mentions, Sundai");
+  assert.equal(r.items[0].raw_label, "Unread messages, Sundai");
 });
 
 test("listGuilds without the rail is a problem", () => {

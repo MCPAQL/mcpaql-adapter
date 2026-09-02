@@ -47,8 +47,11 @@ export const DISCORD_NAV_SELECTORS = {
   guildHomeId: "guildsnav___home",
   channelIdPrefix: "channels___",
   dmHrefPrefix: "/channels/@me/",
-  /** Unread-status prefixes Discord prepends to the hidden guild label. */
-  guildLabelPrefix: /^(?:\d+ )?unread(?: mentions?)?,\s*/i,
+  /**
+   * Unread-status prefixes Discord prepends to the hidden guild label,
+   * observed live: "Unread messages, X", "1 mention, X", "23 mentions, X".
+   */
+  guildLabelPrefix: /^(?:unread(?: messages?| mentions?)?|\d+ (?:unread )?(?:mentions?|messages?)),\s*/i,
 } as const;
 
 export type DiscordNavSelectors = typeof DISCORD_NAV_SELECTORS;
