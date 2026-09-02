@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord DOM extractor (`src/plugins/transport/discord-dom.ts`) — second piece of the read-only Discord adapter (#38, closes #40)
+  - `extractMessages` reads the Discord web client's rendered message list with full fidelity: complete text (no ~100-character accessibility-tree truncation), emoji as alt text, line breaks, mentions, links, grouped-message author attribution, reply linkage to the referenced message id, reactions with counts and own-reaction flag, attachment URLs and filenames (never downloaded), link embeds, edited flag, ISO timestamps
+  - One implementation for two runtimes: the same function is unit-tested in Node against a dependency-free fake DOM and shipped to the browser as its own source text via `buildExtractMessagesExpression`
+  - `DISCORD_SELECTORS` is the single selector table; every entry prefers stable attributes over Discord's hashed class names, and a test asserts each entry is used
+  - Caps applied inside the page (`maxMessages`, `maxBytes`) keep the newest messages and set `truncated`; a missing message list returns a named `problem` instead of empty success
+  - Test helper `test/helpers/fake-dom.ts`: minimal DOM with a small CSS selector subset
+
 - `@mcpaql/security` package (`src/security/`) — standalone security infrastructure ported from DollhouseMCP
   - `tool-classification.ts` — CLI tool risk assessment with 50+ dangerous patterns, risk scoring 0-100
   - `content-validator.ts` — 45+ prompt injection patterns, HTML/XSS detection, YAML bomb detection
