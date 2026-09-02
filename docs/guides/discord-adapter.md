@@ -1,0 +1,93 @@
+# Discord Adapter (read-only)
+
+The Discord adapter reads your Discord conversations out of the Discord web client that is already open in your browser. That is the whole idea: it is a faster, structured copy-paste of a screen you already have in front of you. It reads. It never writes.
+
+## Status
+
+What this repository ships today is the adapter as a **library**: the transport, the page scripts, the listing and history functions, and the read-only and untrusted-content checks, all under `src/plugins/transport/`. The runnable server that exposes them as MCP-AQL operations to a client is tracked separately; until it lands, the operations below are library functions called from code, and the setup section describes what that server will need from you.
+
+## What it is, and what it is not
+
+- It is **not a bot**. Nothing is added to any server, and no server admin is involved.
+- It holds **no token**. Not a bot token, not your user token, not an OAuth grant. There is no Discord developer account to create.
+- It makes **no Discord API calls**. It reads the rendered page in your own browser, the same way select-all and copy does.
+- It **never sends, reacts, edits, types, focuses an input, or clicks**. That is a tested property of the code, not a promise: every script the adapter runs in the page is registered with the side effects it declares, and a test fails if any script uses an input, network, storage, or navigation primitive it has not declared.
+
+## Setup
+
+1. Start Chrome with remote debugging enabled and a separate profile directory, then log in to Discord in that Chrome window.
+
+   Chrome 136 and later open the debugging port only when `--user-data-dir` points somewhere other than the default profile, so the command uses a dedicated directory. That profile has its own logins: sign in to Discord there once.
+
+   macOS:
+
+   ```sh
+   open -a "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
+   ```
+
+   Linux:
+
+   ```sh
+   google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.mcpaql/chrome-discord"
+   ```
+
+   The transport connects to `127.0.0.1:9222` unless its `port` option says otherwise. When the port is closed, the error message includes both commands above.
+
+2. Point the adapter at that Chrome. Today that means constructing `BrowserCdpTransport({ allowedOrigin: "https://discord.com" })` from code; the runnable server will take the same setting from its configuration.
+
+Keep the Discord tab open. It can be in the background, in another window, and unfocused: the adapter works with the tab hidden.
+
+## The one side effect
+
+Opening a channel marks it read in Discord, exactly as clicking it does. Nothing else in the adapter has any effect on your account or on what other people see.
+
+## Discord's terms, plainly
+
+Discord prohibits automating user accounts. This adapter does not use the Discord API, does not hold any credential, and never sends, reacts, or edits. It reads the rendered page in your own browser. You decide for yourself whether that is appropriate for your account.
+
+## Operations
+
+All operations are reads.
+
+| Operation | Function | Parameters | Returns |
+|---|---|---|---|
+| `list_dms` | `listDms` via `buildListExpression("listDms")` | `limit` | Direct and group conversations: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded. |
+| `list_guilds` | `listGuilds` via `buildListExpression("listGuilds")` | `limit` | Servers you belong to: id, name, and the raw sidebar label. |
+| `list_channels` | `listChannels` via `buildListExpression("listChannels")` | `limit` | Text and voice channels of the open server with their category, plus the server's id and name. |
+| `read_messages` | `readMessages` | `channel_id` (required), `guild_id`, `before`, `limit` (50), `scan_cap` (2000), `time_budget_ms` (20000), `window_max_bytes` (4 MiB), `redact` (false) | Messages newest first with author, timestamp, full text, replies, reactions, attachment links, embeds, links, edited flag. |
+
+The three listings return `{ items, count, truncated, problem }`. They read what the sidebar shows at that moment; `truncated` means `limit` cut the list, and there is no cursor: raise `limit` and call again.
+
+`read_messages` returns:
+
+```text
+{ channel, messages, count, scanned, cursor, complete, truncated, stop_reason, problem, elapsed_ms, flags, flagged_ids, highest_severity }
+```
+
+- `complete` is true when `limit` was filled or the beginning of the channel was reached (two consecutive scroll steps with no older history mounting and no loading placeholder above the rows).
+- `truncated` is the opposite of `complete`: a cap, the time budget, a stall, or a problem stopped the read first. `stop_reason` says which: `filled`, `beginning`, `scan_cap`, `time_budget`, `no_growth`, or `problem`.
+- `cursor` is where to continue: the oldest message returned, or, when an incomplete read returned nothing older than `before`, `before` itself. It is null only when the read was complete and returned nothing, or when an incomplete read returned nothing and had no `before`. Pass it as `before` to continue without gaps or duplicates. The adapter never truncates silently.
+- `flags`, `flagged_ids`, `highest_severity` are the untrusted-content findings described below.
+
+Attachments are returned as URLs and filenames only; nothing is downloaded.
+
+## Untrusted content
+
+Everything the adapter reads was written by someone else. Every string field, including author names, reply labels, embed text and URLs, attachment names and URLs, links, reaction emoji, and the channel label, is run through the repository's security validator. Prompt-injection and homoglyph findings are reported per message and per field with a severity. Text that only mixes scripts, as bilingual messages do, is reported at most `medium` and never masked. The text itself is not changed unless `redact` is set, and then a `high` or `critical` field is replaced by a mask, never by normalized text. The flags travel with the result so nothing is silently laundered.
+
+## When Discord changes its markup
+
+Discord hashes its class names and changes its page structure from time to time. The adapter prefers the stable attributes Discord uses for accessibility and navigation (`data-list-id`, element id prefixes, `role`, `datetime`), and where no such attribute exists it matches the un-hashed stem of a class name (`reaction_`, `embed`, `edited`, `scroller`, the loading placeholder). Those stem matches are the selectors most likely to break. Every selector lives in one table per module:
+
+- `src/plugins/transport/discord-dom.ts` — messages
+- `src/plugins/transport/discord-nav.ts` — sidebars and navigation
+- `src/plugins/transport/discord-history.ts` — scrolling for history
+
+Each table has fixture tests built from observed markup. When Discord changes something, one of those tests fails and names the selector, instead of the adapter quietly returning empty results. The fix is a selector edit in one place.
+
+## How it works, briefly
+
+- **Transport.** A read-only session over the Chrome DevTools Protocol to your already-running Chrome, using the WebSocket client built into Node. Exactly one protocol method is allowed, `Runtime.evaluate`; the allowlist is tested. The session is pinned to `https://discord.com`: the origin is checked inside every evaluation, so a tab that navigates away never runs a script.
+- **Scripts.** Each page script is a self-contained function that is unit-tested in Node against a small fake DOM and shipped to the browser as its own source text. What the tests ran is what the page runs; a test transpiles the module the way the build does and proves the result runs in a bare context.
+- **History.** Discord loads older messages when the list is scrolled to the top. The adapter nudges the real scroller, dispatches a synthetic scroll event (hidden tabs never render a native one), and polls from the Node side for the list to grow. All waiting happens in Node, because hidden tabs throttle in-page timers.
+- **Navigation.** Opening a channel is a same-document route change, a history push plus the `popstate` event Discord's router handles, so the client is never reloaded. Paths are built only from validated snowflake ids; a caller-supplied URL never reaches the page.
