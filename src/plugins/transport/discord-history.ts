@@ -135,7 +135,7 @@ export function buildMountedCountExpression(selectors: DiscordHistorySelectors =
 }
 
 export interface ScrollStepOptions {
-  /** How long to wait for Discord to prepend rows after the nudge. @default 3000 */
+  /** How long to wait for Discord to prepend rows after the nudge; also bounds every evaluate. @default 3000 */
   growWaitMs?: number;
   /** Poll interval while waiting. @default 300 */
   pollMs?: number;
@@ -162,13 +162,15 @@ export async function scrollStep(evaluate: Evaluate, options: ScrollStepOptions 
   const pollMs = options.pollMs ?? 300;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = options.now ?? Date.now;
-  const nudge = (await evaluate(options.nudgeExpression ?? buildScrollNudgeExpression())) as ScrollStepResult;
-  if (nudge.problem !== null) return { before: nudge.count, after: nudge.count, moreAbove: false, problem: nudge.problem };
   const started = now();
+  const left = (): number => Math.max(1, growWaitMs - (now() - started));
+  const nudge = (await evaluate(options.nudgeExpression ?? buildScrollNudgeExpression(), { timeoutMs: left() })) as ScrollStepResult;
+  if (nudge.problem !== null) return { before: nudge.count, after: nudge.count, moreAbove: false, problem: nudge.problem };
   let latest: ScrollStepResult = nudge;
   while (now() - started < growWaitMs) {
-    await sleep(pollMs);
-    latest = (await evaluate(options.countExpression ?? buildMountedCountExpression())) as ScrollStepResult;
+    await sleep(Math.min(pollMs, left()));
+    if (now() - started >= growWaitMs) break;
+    latest = (await evaluate(options.countExpression ?? buildMountedCountExpression(), { timeoutMs: left() })) as ScrollStepResult;
     if (latest.problem !== null) return { before: nudge.count, after: latest.count, moreAbove: false, problem: latest.problem };
     if (latest.count !== nudge.count) break;
   }
@@ -197,7 +199,7 @@ export interface ReadMessagesResult {
   /** Newest first. */
   messages: DiscordMessage[];
   count: number;
-  /** Distinct rows examined across all windows. */
+  /** Distinct rows examined across all windows (overlapping windows counted once). */
   scanned: number;
   /** Oldest message id returned; pass as `before` to continue. Null when nothing was returned. */
   cursor: string | null;
@@ -218,8 +220,13 @@ export interface ReadMessagesDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Override the in-page expressions (tests). */
   extractExpression?: (channelId: string, maxBytes: number) => string;
-  scrollStep?: (evaluate: Evaluate) => Promise<ScrollStepOutcome>;
+  scrollStep?: (evaluate: Evaluate, growWaitMs: number) => Promise<ScrollStepOutcome>;
 }
+
+/** Longest a single scroll step may wait for Discord to prepend rows. */
+const STEP_GROW_WAIT_MS = 3000;
+/** A step needs at least this much budget to be worth starting. */
+const MIN_STEP_MS = 400;
 
 const DEFAULTS = { limit: 50, scan_cap: 2000, time_budget_ms: 20_000, window_max_bytes: 4 * 1024 * 1024 } as const;
 
@@ -253,11 +260,12 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   const budgetLeft = (): number => p.time_budget_ms - (now() - started);
   const extractExpr = deps.extractExpression
     ?? ((channelId: string, maxBytes: number) => buildExtractMessagesExpression({ channelId, maxBytes, maxMessages: 1000 }, DISCORD_SELECTORS));
-  const step = deps.scrollStep ?? ((ev: Evaluate) => scrollStep(ev, { sleep: deps.sleep, now: deps.now }));
+  const step = deps.scrollStep ?? ((ev: Evaluate, growWaitMs: number) => scrollStep(ev, { sleep: deps.sleep, now: deps.now, growWaitMs }));
 
   const seen = new Map<string, DiscordMessage>();
   let label: string | null = null;
-  let scanned = 0;
+  // `scanned` is distinct rows examined: overlapping windows are not double counted.
+  const examined = new Set<string>();
   let stop: ReadMessagesResult["stop_reason"] | null = null;
   let problem: string | null = null;
 
@@ -272,31 +280,54 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     sleep: deps.sleep,
   });
 
-  let noGrowthStreak = 0;
+  let noProgressStreak = 0;
+  let lastStepGrew = true;
   while (stop === null) {
-    const window = (await deps.evaluate(extractExpr(p.channel_id, p.window_max_bytes))) as ExtractResult;
+    if (budgetLeft() <= 0) { stop = "time_budget"; break; }
+    const window = (await deps.evaluate(
+      extractExpr(p.channel_id, p.window_max_bytes),
+      { timeoutMs: Math.max(1, budgetLeft()) },
+    )) as ExtractResult;
     if (window.problem !== null && window.count === 0) {
       stop = "problem";
       problem = window.problem;
       break;
     }
     label = label ?? window.channel.label;
-    scanned += window.scanned;
-    for (const m of window.messages) if (!seen.has(m.id)) seen.set(m.id, m);
+
+    // Merge newest-first, admitting distinct rows only up to the scan
+    // allowance. Rows beyond it are neither examined nor returned, so a
+    // single large window cannot exceed `scan_cap` and report success.
+    let added = 0;
+    let capped = false;
+    for (let i = window.messages.length - 1; i >= 0; i--) {
+      const m = window.messages[i];
+      if (examined.has(m.id)) continue;
+      if (examined.size >= p.scan_cap) { capped = true; break; }
+      examined.add(m.id);
+      seen.set(m.id, m);
+      added++;
+    }
 
     if (wanted().length >= p.limit) { stop = "filled"; break; }
-    if (scanned >= p.scan_cap) { stop = "scan_cap"; break; }
-    if (budgetLeft() < 500) { stop = "time_budget"; break; }
+    if (capped || examined.size >= p.scan_cap) { stop = "scan_cap"; break; }
 
-    const moved = await step(deps.evaluate);
-    if (moved.problem !== null) { stop = "problem"; problem = moved.problem; break; }
-    if (moved.after === moved.before) {
-      if (!moved.moreAbove) { stop = "beginning"; break; }
-      noGrowthStreak++;
-      if (noGrowthStreak >= 3) { stop = "no_growth"; break; }
+    // Progress is either more mounted rows after the last step or new ids
+    // in this window (a virtualized list can swap rows without changing
+    // its count). Three steps without either means Discord is not loading.
+    if (!lastStepGrew && added === 0) {
+      if (++noProgressStreak >= 3) { stop = "no_growth"; break; }
     } else {
-      noGrowthStreak = 0;
+      noProgressStreak = 0;
     }
+
+    // A step that cannot fit in the remaining budget is not started.
+    const stepBudget = Math.min(STEP_GROW_WAIT_MS, budgetLeft() - MIN_STEP_MS);
+    if (stepBudget < MIN_STEP_MS) { stop = "time_budget"; break; }
+    const moved = await step(deps.evaluate, stepBudget);
+    if (moved.problem !== null) { stop = "problem"; problem = moved.problem; break; }
+    lastStepGrew = moved.after !== moved.before;
+    if (!lastStepGrew && !moved.moreAbove) { stop = "beginning"; break; }
   }
 
   // Resolve grouped authors across windows from author_ref.
@@ -316,7 +347,7 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     channel: { id: p.channel_id, label },
     messages,
     count: messages.length,
-    scanned,
+    scanned: examined.size,
     cursor: messages.length > 0 ? messages[messages.length - 1].id : null,
     complete,
     truncated: !complete,
