@@ -17,7 +17,7 @@ import {
   type DeclaredEffect,
 } from "../src/plugins/transport/discord-scripts.js";
 
-const MODULES = ["discord-dom.ts", "discord-nav.ts", "discord-history.ts"];
+const MODULES = ["discord-dom.ts", "discord-nav.ts", "discord-history.ts", "discord-operations.ts"];
 
 function moduleSource(name: string): string {
   return readFileSync(new URL(`../src/plugins/transport/${name}`, import.meta.url), "utf8");
