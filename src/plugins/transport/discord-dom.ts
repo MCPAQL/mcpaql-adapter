@@ -28,8 +28,14 @@ export const DISCORD_SELECTORS = {
   messageList: 'ol[data-list-id="chat-messages"]',
   /** Message rows; id is `chat-messages-<channelId>-<messageId>`. Date dividers are excluded by the id prefix. */
   messageItem: 'li[id^="chat-messages-"]',
-  /** Author header, present only on the first message of a group. */
-  header: "h3",
+  /** The message article; `aria-labelledby` names the group's username element. */
+  article: '[role="article"]',
+  /**
+   * Author header, present only on the first message of a group. Scoped by
+   * its `aria-labelledby` so an `h3` rendered from markdown inside message
+   * content is never mistaken for it.
+   */
+  header: 'h3[aria-labelledby*="message-username-"]',
   /** Author display name; id `message-username-<messageId>`. */
   username: '[id^="message-username-"]',
   /** Absolute timestamp; `datetime` is ISO 8601. */
@@ -41,7 +47,9 @@ export const DISCORD_SELECTORS = {
   /** Attachments, embeds, reactions live here; id `message-accessories-<messageId>`. */
   accessories: '[id^="message-accessories-"]',
   reactionsGroup: '[id^="message-reactions-"]',
-  reaction: '[class*="reactionInner"]',
+  /** One reaction pill. Its class list carries `reactionMe` when the current user reacted (locale-independent). */
+  reaction: '[class*="reaction_"]',
+  reactionInner: '[class*="reactionInner"]',
   reactionCount: '[class*="reactionCount"]',
   emojiImage: 'img[data-type="emoji"], img[class*="emoji"]',
   attachmentLink: 'a[href*="cdn.discordapp.com/attachments/"], a[href*="media.discordapp.net/attachments/"]',
@@ -51,6 +59,14 @@ export const DISCORD_SELECTORS = {
   embedDescription: '[class*="embedDescription"]',
   edited: '[class*="edited"]',
   contentLink: "a[href]",
+  /** Markers (not selectors) used to parse ids, labels, and class stems. */
+  usernameIdPrefix: "message-username-",
+  contentIdPrefix: "message-content-",
+  listLabelPrefix: "Messages in ",
+  /** Class stem that marks a reaction pill as the current user's. */
+  reactionMeClass: "reactionMe",
+  /** Class stem of the "(edited)" decoration inside content; excluded from text. */
+  editedClass: "edited",
 } as const;
 
 export type DiscordSelectors = typeof DISCORD_SELECTORS;
@@ -60,10 +76,32 @@ export const DEFAULT_MAX_MESSAGES = 100;
 export const DEFAULT_MAX_BYTES = 1024 * 1024;
 
 export interface ExtractOptions {
-  /** Maximum messages returned, newest wins. @default 100 */
+  /** Maximum messages returned, newest wins. @default DEFAULT_MAX_MESSAGES */
   maxMessages?: number;
-  /** Approximate serialized size cap for the whole result. @default 1 MiB */
+  /** UTF-8 size cap for the whole serialized result, envelope included. @default DEFAULT_MAX_BYTES */
   maxBytes?: number;
+  /**
+   * Channel the caller expects to read. Required to disambiguate when Discord
+   * mounts two message lists (thread or forum split view). When omitted and
+   * more than one list is mounted, the result carries a `problem`.
+   */
+  channelId?: string | null;
+}
+
+/** Options with every default applied; the only shape the extractor accepts. */
+export interface ResolvedExtractOptions {
+  maxMessages: number;
+  maxBytes: number;
+  channelId: string | null;
+}
+
+/** Apply defaults once, for both the browser expression and the Node tests. */
+export function resolveExtractOptions(opts: ExtractOptions = {}): ResolvedExtractOptions {
+  return {
+    maxMessages: Math.max(1, Math.floor(opts.maxMessages ?? DEFAULT_MAX_MESSAGES)),
+    maxBytes: Math.max(1024, Math.floor(opts.maxBytes ?? DEFAULT_MAX_BYTES)),
+    channelId: opts.channelId ?? null,
+  };
 }
 
 export interface DiscordReaction {
@@ -89,8 +127,20 @@ export interface DiscordMessage {
   id: string;
   channel_id: string;
   author: string | null;
-  /** True when the author was taken from the group header of an earlier message. */
+  /**
+   * True when the author was resolved through the group header of an earlier
+   * message (Discord's `aria-labelledby` link). False for group-start rows and
+   * for rows with no resolvable author, such as system notices; those carry
+   * `author: null` rather than a guessed name.
+   */
   author_inherited: boolean;
+  /**
+   * Id of the group-start message whose header names the author, when this
+   * row is a grouped continuation. Present even when that header is not
+   * mounted (Discord virtualizes the list), so a caller paging through
+   * history can resolve `author` from an adjacent page.
+   */
+  author_ref: string | null;
   timestamp: string | null;
   content: string;
   reply_to: string | null;
@@ -107,11 +157,19 @@ export interface ExtractResult {
   /** In DOM order: oldest first. Callers wanting newest-first reverse it. */
   messages: DiscordMessage[];
   count: number;
+  /** Rows examined, including any dropped by caps or skipped as malformed. */
+  scanned: number;
   /** Set when a cap stopped extraction before the visible list was exhausted. */
   truncated: boolean;
   /** Present when the page did not look like a Discord chat view. */
   problem: string | null;
 }
+
+/**
+ * What the extractor may do with its root: query, nothing else. The page
+ * passes `document`, which has no attributes or tag of its own.
+ */
+export type DomRoot = Pick<DomNode, "querySelector" | "querySelectorAll">;
 
 /**
  * Narrow DOM surface the extractor needs. Real browsers satisfy it; the
@@ -134,66 +192,96 @@ export interface DomNode {
  * `Function.prototype.toString`. Keep every helper inside.
  */
 export function extractMessages(
-  root: DomNode,
+  root: DomRoot,
   sel: DiscordSelectors,
-  opts: ExtractOptions,
+  opts: ResolvedExtractOptions,
 ): ExtractResult {
-  const maxMessages = Math.max(1, Math.floor(opts.maxMessages ?? 100));
-  const maxBytes = Math.max(1024, Math.floor(opts.maxBytes ?? 1024 * 1024));
+  const maxMessages = opts.maxMessages;
+  const maxBytes = opts.maxBytes;
 
-  const toArray = <T>(list: ArrayLike<T>): T[] => Array.prototype.slice.call(list);
   const attr = (node: DomNode | null, name: string): string | null => (node ? node.getAttribute(name) : null);
+  const qsa = (node: DomRoot | null, selector: string): DomNode[] => (node ? Array.from(node.querySelectorAll(selector)) : []);
+  /** Ids are interpolated into selectors; only accept the character set Discord uses. */
+  const safeToken = (value: string | null): value is string => value !== null && /^[\w-]+$/.test(value);
+  /** UTF-8 byte length of a JS string, so caps mean bytes on the wire, not code units. */
+  const utf8Length = (text: string): number => {
+    let n = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c < 0x80) n += 1;
+      else if (c < 0x800) n += 2;
+      else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+      else n += 3;
+    }
+    return n;
+  };
 
   /** Text with emoji images rendered as their alt text and <br> as newlines. */
   const renderText = (node: DomNode | null): string => {
     if (!node) return "";
-    let out = "";
+    const parts: string[] = [];
     const walk = (n: DomNode): void => {
       if (n.nodeType === 3) {
-        out += n.nodeValue ?? "";
+        parts.push(n.nodeValue ?? "");
         return;
       }
       if (n.nodeType !== 1) return;
+      if ((n.getAttribute("class") ?? "").includes(sel.editedClass)) return;
       const tag = (n.tagName ?? "").toUpperCase();
       if (tag === "IMG") {
         const alt = n.getAttribute("alt");
         const name = n.getAttribute("data-name");
-        out += alt && alt.trim() !== "" ? alt : (name ?? "");
+        parts.push(alt && alt.trim() !== "" ? alt : (name ?? ""));
         return;
       }
       if (tag === "BR") {
-        out += "\n";
+        parts.push("\n");
         return;
       }
-      const kids = toArray(n.childNodes);
-      for (const k of kids) walk(k);
+      const kids = n.childNodes;
+      for (let i = 0; i < kids.length; i++) walk(kids[i]);
     };
     walk(node);
-    return out;
+    // Discord pads with non-breaking spaces; normalize every rendered string once.
+    return parts.join("").replace(/[\u00a0\u2007\u202f]/g, " ");
   };
 
   const idSuffix = (id: string | null, prefix: string): string | null =>
     id && id.startsWith(prefix) ? id.slice(prefix.length) : null;
 
-  const list = root.querySelector(sel.messageList);
-  if (!list) {
-    return {
-      channel: { id: null, label: null },
-      messages: [],
-      count: 0,
-      truncated: false,
-      problem: "No message list found. Open a DM or text channel in Discord and retry.",
-    };
+  const fail = (problem: string): ExtractResult => ({
+    channel: { id: null, label: null },
+    messages: [],
+    count: 0,
+    scanned: 0,
+    truncated: false,
+    problem,
+  });
+
+  const lists = qsa(root, sel.messageList);
+  if (lists.length === 0) {
+    return fail("No message list found. Open a DM or text channel in Discord and retry.");
+  }
+  let list: DomNode | null = null;
+  if (opts.channelId !== null) {
+    if (!safeToken(opts.channelId)) return fail("channelId must be a Discord snowflake.");
+    list = lists.find((l) => l.querySelector(`li[id^="chat-messages-${opts.channelId}-"]`) !== null) ?? null;
+    if (!list) {
+      return fail(`Channel ${opts.channelId} is not in view. Open it in Discord and retry.`);
+    }
+  } else if (lists.length > 1) {
+    return fail("More than one message list is mounted (thread or forum split view). Pass channelId to choose one.");
+  } else {
+    list = lists[0];
   }
   const listLabel = attr(list, "aria-label");
-  const channelLabel = listLabel && listLabel.startsWith("Messages in ")
-    ? listLabel.slice("Messages in ".length)
-    : listLabel;
+  const channelLabel = idSuffix(listLabel, sel.listLabelPrefix) ?? listLabel;
 
-  const items = toArray(list.querySelectorAll(sel.messageItem));
+  const items = qsa(list, sel.messageItem);
   const messages: DiscordMessage[] = [];
   let channelId: string | null = null;
-  let bytes = 2;
+  // Envelope overhead counts toward the cap so the whole result respects it.
+  let bytes = utf8Length(JSON.stringify({ channel: { id: null, label: channelLabel }, messages: [], count: 0, truncated: false, problem: null }));
   let truncated = false;
 
   // Walk newest-to-oldest so caps keep the most recent messages, then restore DOM order.
@@ -204,69 +292,73 @@ export function extractMessages(
     if (parts.length < 4) continue;
     const messageId = parts[parts.length - 1];
     const chanId = parts[parts.length - 2];
-    channelId = channelId ?? chanId;
+    if (!safeToken(messageId) || !safeToken(chanId)) continue;
 
     const header = li.querySelector(sel.header);
     let author: string | null = null;
     let authorInherited = false;
+    let authorRef: string | null = null;
     if (header) {
       author = renderText(header.querySelector(sel.username)).trim() || null;
     } else {
       // Grouped messages carry `aria-labelledby="message-username-<groupStartId> ..."`.
-      const article = li.querySelector('[role="article"]');
-      const labelledBy = attr(article, "aria-labelledby") ?? "";
-      const usernameId = labelledBy.split(/\s+/).find((t) => t.startsWith("message-username-"));
-      const usernameNode = usernameId ? root.querySelector(`[id="${usernameId}"]`) : null;
-      author = usernameNode ? (renderText(usernameNode).trim() || null) : null;
-      authorInherited = true;
+      // System rows have no such token and keep author null; nothing is guessed.
+      // The header may be unmounted (virtualized list); author_ref lets a caller
+      // resolve it from an adjacent page.
+      const labelledBy = attr(li.querySelector(sel.article), "aria-labelledby") ?? "";
+      const usernameId = labelledBy.split(/\s+/).find((t) => t.startsWith(sel.usernameIdPrefix)) ?? null;
+      if (safeToken(usernameId)) {
+        authorRef = usernameId.slice(sel.usernameIdPrefix.length);
+        const usernameNode = root.querySelector(`#${usernameId}`);
+        author = usernameNode ? (renderText(usernameNode).trim() || null) : null;
+        authorInherited = author !== null;
+      }
     }
 
-    const timeNode = li.querySelector(sel.time);
-    const timestamp = attr(timeNode, "datetime");
+    const timestamp = attr(li.querySelector(sel.time), "datetime");
 
-    const contentNode = li.querySelector(`[id="message-content-${messageId}"]`);
-    const content = renderText(contentNode).replace(/ /g, " ").trim();
+    // Reply previews reuse the referenced message's `message-content-<refId>`, so own
+    // content is matched by exact id within this row, never by prefix.
+    const contentNode = li.querySelector(`[id="${sel.contentIdPrefix}${messageId}"]`);
+    const content = renderText(contentNode).trim();
 
     const replyCtx = li.querySelector(sel.replyContext);
     const replyPreview = replyCtx ? replyCtx.querySelector(sel.replyContent) : null;
-    const replyTo = idSuffix(attr(replyPreview, "id"), "message-content-");
+    const replyTo = idSuffix(attr(replyPreview, "id"), sel.contentIdPrefix);
     const replyLabel = attr(replyCtx, "aria-label");
 
     const accessories = li.querySelector(sel.accessories);
-
     const reactions: DiscordReaction[] = [];
-    const reactionsGroup = accessories ? accessories.querySelector(sel.reactionsGroup) : null;
-    if (reactionsGroup) {
-      for (const r of toArray(reactionsGroup.querySelectorAll(sel.reaction))) {
-        const img = r.querySelector(sel.emojiImage);
-        const emoji = (attr(img, "alt") ?? attr(img, "data-name") ?? "").trim();
-        const countText = renderText(r.querySelector(sel.reactionCount)).trim();
-        const count = Number.parseInt(countText, 10);
-        const label = attr(r, "aria-label") ?? "";
+    const attachments: DiscordAttachment[] = [];
+    const embeds: DiscordEmbed[] = [];
+    if (accessories) {
+      for (const r of qsa(accessories.querySelector(sel.reactionsGroup), sel.reaction)) {
+        const inner = r.querySelector(sel.reactionInner) ?? r;
+        const emoji = renderText(inner.querySelector(sel.emojiImage)).trim();
+        const count = Number.parseInt(renderText(inner.querySelector(sel.reactionCount)).trim(), 10);
+        const label = attr(inner, "aria-label") ?? "";
         reactions.push({
           emoji: emoji || label.split(",")[0].trim(),
           count: Number.isFinite(count) ? count : 0,
-          me: /remove your reaction/i.test(label),
+          me: (attr(r, "class") ?? "").includes(sel.reactionMeClass),
         });
       }
-    }
-
-    const attachments: DiscordAttachment[] = [];
-    const seenUrls = new Set<string>();
-    if (accessories) {
-      for (const a of toArray(accessories.querySelectorAll(sel.attachmentLink))) {
+      const seenUrls = new Set<string>();
+      for (const a of qsa(accessories, sel.attachmentLink)) {
         const href = attr(a, "href");
         if (!href || seenUrls.has(href)) continue;
         seenUrls.add(href);
-        const path = href.split("?")[0];
-        const filename = decodeURIComponent(path.slice(path.lastIndexOf("/") + 1));
+        const path = href.split("#")[0].split("?")[0];
+        const rawName = path.slice(path.lastIndexOf("/") + 1);
+        let filename = rawName;
+        try {
+          filename = decodeURIComponent(rawName);
+        } catch {
+          // Malformed percent-encoding: keep the raw name rather than lose the row.
+        }
         attachments.push({ url: href, filename });
       }
-    }
-
-    const embeds: DiscordEmbed[] = [];
-    if (accessories) {
-      for (const e of toArray(accessories.querySelectorAll(sel.embed))) {
+      for (const e of qsa(accessories, sel.embed)) {
         const titleLink = e.querySelector(sel.embedTitleLink);
         embeds.push({
           provider: renderText(e.querySelector(sel.embedProvider)).trim() || null,
@@ -278,11 +370,9 @@ export function extractMessages(
     }
 
     const links: string[] = [];
-    if (contentNode) {
-      for (const a of toArray(contentNode.querySelectorAll(sel.contentLink))) {
-        const href = attr(a, "href");
-        if (href && !links.includes(href)) links.push(href);
-      }
+    for (const a of qsa(contentNode, sel.contentLink)) {
+      const href = attr(a, "href");
+      if (href && !links.includes(href)) links.push(href);
     }
 
     const edited = contentNode ? contentNode.querySelector(sel.edited) !== null : false;
@@ -292,6 +382,7 @@ export function extractMessages(
       channel_id: chanId,
       author,
       author_inherited: authorInherited,
+      author_ref: authorRef,
       timestamp,
       content,
       reply_to: replyTo,
@@ -303,29 +394,27 @@ export function extractMessages(
       edited,
     };
 
-    const size = JSON.stringify(message).length + 1;
+    const size = utf8Length(JSON.stringify(message)) + 1;
     if (messages.length >= maxMessages || bytes + size > maxBytes) {
       truncated = true;
       break;
     }
     bytes += size;
     messages.push(message);
+    channelId = chanId;
   }
 
   messages.reverse();
 
-  // Fallback for grouped messages whose group header was outside the cap window.
-  let carry: string | null = null;
-  for (const m of messages) {
-    if (m.author && !m.author_inherited) carry = m.author;
-    else if (!m.author && carry) m.author = carry;
-  }
   return {
     channel: { id: channelId, label: channelLabel },
     messages,
     count: messages.length,
+    scanned: items.length,
     truncated,
-    problem: null,
+    problem: truncated && messages.length === 0
+      ? `The newest message alone exceeds maxBytes (${maxBytes}). Raise the cap.`
+      : null,
   };
 }
 
@@ -344,9 +433,6 @@ export function buildExtractMessagesExpression(
   // shim only when the source references it, so both runtimes ship code that
   // runs in a bare browser context.
   const shim = /\b__name\(/.test(source) ? "const __name = (fn) => fn; " : "";
-  const args = `document, ${JSON.stringify(selectors)}, ${JSON.stringify({
-    maxMessages: opts.maxMessages ?? DEFAULT_MAX_MESSAGES,
-    maxBytes: opts.maxBytes ?? DEFAULT_MAX_BYTES,
-  })}`;
+  const args = `document, ${JSON.stringify(selectors)}, ${JSON.stringify(resolveExtractOptions(opts))}`;
   return `(() => { ${shim}return (${source})(${args}); })()`;
 }

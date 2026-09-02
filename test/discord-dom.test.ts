@@ -7,12 +7,17 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import ts from "typescript";
 
 import {
   DISCORD_SELECTORS,
   buildExtractMessagesExpression,
   extractMessages,
+  resolveExtractOptions,
+  type DomRoot,
+  type ExtractOptions,
 } from "../src/plugins/transport/discord-dom.js";
 import { FakeNode, el } from "./helpers/fake-dom.js";
 
@@ -21,6 +26,8 @@ const A = "1544685390995132426";
 const B = "1544699967019425842";
 const C = "1544728164323041340";
 const D = "1544806458888028301";
+
+const run = (root: DomRoot, opts: ExtractOptions) => extractMessages(root, DISCORD_SELECTORS, resolveExtractOptions(opts));
 
 const LONG = "This message is deliberately longer than one hundred characters so that we can prove the extractor does not truncate the way the accessibility tree does. ";
 
@@ -123,7 +130,7 @@ function messageC(): FakeNode {
 function messageD(): FakeNode {
   return li(D, article(D, `message-username-${D} uid_3 message-content-${D} u`,
     el("div", { class: "contents_c19a55" },
-      el("h3", { class: "header_c19a55" },
+      el("h3", { class: "header_c19a55", "aria-labelledby": `message-username-${D} message-timestamp-${D}` },
         el("span", { id: `message-username-${D}`, class: "headerText_c19a55" }, el("span", { class: "username_c19a55", role: "button" }, "Alice")),
         timeNode(D, "2026-09-02T20:29:20.915Z"),
       ),
@@ -154,7 +161,7 @@ function fixture(): FakeNode {
 // --- Fidelity ---
 
 test("extracts every message and skips date dividers, oldest first", () => {
-  const r = extractMessages(fixture(), DISCORD_SELECTORS, {});
+  const r = run(fixture(), {});
   assert.equal(r.problem, null);
   assert.equal(r.count, 4);
   assert.deepEqual(r.messages.map((m) => m.id), [A, B, C, D]);
@@ -163,7 +170,7 @@ test("extracts every message and skips date dividers, oldest first", () => {
 });
 
 test("content is complete: long text intact, emoji as alt, <br> as newline, mention and link text", () => {
-  const [a] = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages;
+  const [a] = run(fixture(), {}).messages;
   assert.ok(a.content.startsWith(LONG.trim()), "long text must not be truncated");
   assert.ok(a.content.length > 150);
   assert.ok(a.content.includes("😉"));
@@ -176,31 +183,32 @@ test("content is complete: long text intact, emoji as alt, <br> as newline, ment
 });
 
 test("grouped message inherits its author from the group header and keeps its own timestamp", () => {
-  const b = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages[1];
+  const b = run(fixture(), {}).messages[1];
   assert.equal(b.author, "Alice");
   assert.equal(b.author_inherited, true);
+  assert.equal(b.author_ref, A);
   assert.equal(b.timestamp, "2026-09-02T13:26:11.268Z");
   assert.equal(b.content, "lol");
 });
 
 test("attachments are URLs plus filenames, deduped, never downloaded", () => {
-  const b = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages[1];
+  const b = run(fixture(), {}).messages[1];
   assert.equal(b.attachments.length, 1);
   assert.equal(b.attachments[0].filename, "image0.jpg");
   assert.match(b.attachments[0].url, /^https:\/\/cdn\.discordapp\.com\/attachments\//);
 });
 
 test("reply linkage points at the referenced message, not the reply preview text", () => {
-  const c = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages[2];
+  const c = run(fixture(), {}).messages[2];
   assert.equal(c.reply_to, A);
   assert.equal(c.reply_label, "Bob replying to Alice");
-  assert.equal(c.content, "oops.. you're right - my bad. (edited)");
+  assert.equal(c.content, "oops.. you're right - my bad.", "the (edited) decoration is a flag, not content");
   assert.equal(c.author, "Bob");
   assert.equal(c.edited, true);
 });
 
 test("reactions carry emoji, count, and whether the current user reacted", () => {
-  const c = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages[2];
+  const c = run(fixture(), {}).messages[2];
   assert.deepEqual(c.reactions, [
     { emoji: "😆", count: 1, me: true },
     { emoji: "👍", count: 3, me: false },
@@ -208,7 +216,7 @@ test("reactions carry emoji, count, and whether the current user reacted", () =>
 });
 
 test("embeds carry provider, title, url, description", () => {
-  const d = extractMessages(fixture(), DISCORD_SELECTORS, {}).messages[3];
+  const d = run(fixture(), {}).messages[3];
   assert.deepEqual(d.embeds, [{
     provider: "GitHub",
     title: "PDPP: Personal Data Portability Protocol",
@@ -221,20 +229,20 @@ test("embeds carry provider, title, url, description", () => {
 // --- Caps ---
 
 test("maxMessages keeps the newest messages and flags truncation", () => {
-  const r = extractMessages(fixture(), DISCORD_SELECTORS, { maxMessages: 2 });
+  const r = run(fixture(), { maxMessages: 2 });
   assert.deepEqual(r.messages.map((m) => m.id), [C, D]);
   assert.equal(r.truncated, true);
 });
 
 test("maxBytes stops extraction and flags truncation", () => {
-  const r = extractMessages(fixture(), DISCORD_SELECTORS, { maxBytes: 1024 });
+  const r = run(fixture(), { maxBytes: 1024 });
   assert.ok(r.count < 4);
   assert.equal(r.truncated, true);
 });
 
 test("a grouped message outside the cap window still resolves its author via the page", () => {
   // Only B (index 1) and later fit; B's header lives on A, which is outside the window.
-  const r = extractMessages(fixture(), DISCORD_SELECTORS, { maxMessages: 3 });
+  const r = run(fixture(), { maxMessages: 3 });
   assert.deepEqual(r.messages.map((m) => m.id), [B, C, D]);
   assert.equal(r.messages[0].author, "Alice");
   assert.equal(r.messages[0].author_inherited, true);
@@ -256,8 +264,8 @@ test("extractor source is self-contained and runs verbatim in a bare context", (
   const helpers = new Set(expr.match(/__[a-zA-Z]+\(/g) ?? []);
   helpers.delete("__name(");
   assert.deepEqual([...helpers], [], "only the shimmed __name helper may appear");
-  const direct = extractMessages(fixture(), DISCORD_SELECTORS, { maxMessages: 10 });
-  const viaPage = vm.runInNewContext(expr, { document: fixture() });
+  const direct = run(fixture(), { maxMessages: 10 });
+  const viaPage = vm.runInNewContext(expr, { document: documentShaped(fixture()) });
   // The sandbox realm has its own Object prototype; compare by value.
   assert.deepEqual(JSON.parse(JSON.stringify(viaPage)), JSON.parse(JSON.stringify(direct)));
 });
@@ -265,6 +273,155 @@ test("extractor source is self-contained and runs verbatim in a bare context", (
 test("every selector in the table is used by the extractor", () => {
   const source = extractMessages.toString();
   for (const key of Object.keys(DISCORD_SELECTORS)) {
-    assert.ok(source.includes(`sel.${key}`), `selector ${key} is declared but unused`);
+    assert.ok(new RegExp(`\\bsel\\.${key}\\b`).test(source), `selector ${key} is declared but unused`);
   }
+});
+
+/** A root with only what `document` offers the extractor: the two query methods. */
+function documentShaped(root: FakeNode): DomRoot {
+  return {
+    querySelector: (q: string) => root.querySelector(q),
+    querySelectorAll: (q: string) => root.querySelectorAll(q),
+  };
+}
+
+test("the tsc-compiled extractor (what ships in dist/) also runs bare", () => {
+  const source = readFileSync(new URL("../src/plugins/transport/discord-dom.ts", import.meta.url), "utf8");
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText.replace(/^export /gm, "");
+  const context = vm.createContext({ document: documentShaped(fixture()), JSON, Math, Array, Number, Set, RegExp });
+  vm.runInContext(js, context);
+  const expr = vm.runInContext("buildExtractMessagesExpression({ maxMessages: 10 })", context) as string;
+  assert.ok(!expr.includes("__name"), "tsc output needs no helper shim");
+  const viaDist = vm.runInNewContext(expr, { document: documentShaped(fixture()) });
+  const direct = run(fixture(), { maxMessages: 10 });
+  assert.deepEqual(JSON.parse(JSON.stringify(viaDist)), JSON.parse(JSON.stringify(direct)));
+});
+
+test("every selector-valued table entry parses in the fake DOM grammar", () => {
+  const probe = el("div", {});
+  for (const [key, value] of Object.entries(DISCORD_SELECTORS)) {
+    if (/Prefix$|Class$/.test(key)) continue; // markers, not selectors
+    assert.doesNotThrow(() => probe.querySelectorAll(value), `selector ${key} = ${value}`);
+  }
+});
+
+test("scanned counts every row examined, including dropped ones", () => {
+  const r = run(fixture(), { maxMessages: 2 });
+  assert.equal(r.scanned, 4);
+  assert.equal(r.count, 2);
+});
+
+// --- Review-driven edge cases ---
+
+function listOf(label: string, ...rows: FakeNode[]): FakeNode {
+  return el("ol", { "aria-label": `Messages in ${label}`, role: "list", "data-list-id": "chat-messages" }, ...rows);
+}
+
+function wrap(...lists: FakeNode[]): FakeNode {
+  return el("html", {}, el("body", {}, el("main", {}, ...lists)));
+}
+
+test("a markdown heading inside a grouped message is not mistaken for the author header", () => {
+  const withHeading = li(B, article(B, `message-username-${A} uid_3 message-content-${B} m`,
+    el("div", { class: "contents_c19a55" },
+      el("time", { id: `message-timestamp-${B}`, datetime: "2026-09-02T13:26:11.268Z" }, "9:26 AM"),
+      el("div", { id: `message-content-${B}`, class: "markup__75297 messageContent_c19a55" },
+        el("h3", { class: "heading_b3f4a1" }, "Title"), el("br", {}), el("span", {}, "body")),
+    ),
+  ));
+  const r = run(wrap(listOf("x", messageA(), withHeading)), {});
+  assert.equal(r.messages[1].author, "Alice");
+  assert.equal(r.messages[1].author_inherited, true);
+  assert.equal(r.messages[1].content, "Title\nbody");
+});
+
+test("a system row with no author markup stays unattributed instead of inheriting a neighbor", () => {
+  const system = li(C, article(C, `message-content-${C} uid_9`,
+    el("div", { class: "contents_c19a55" },
+      el("time", { id: `message-timestamp-${C}`, datetime: "2026-09-02T14:00:00.000Z" }, "10:00 AM"),
+      el("div", { id: `message-content-${C}`, class: "markup__75297 messageContent_c19a55" }, el("span", {}, "Bob joined the server.")),
+    ),
+  ));
+  const r = run(wrap(listOf("x", messageA(), system)), {});
+  assert.deepEqual([r.messages[1].author, r.messages[1].author_inherited, r.messages[1].author_ref], [null, false, null]);
+});
+
+test("a grouped message whose header is not mounted keeps author_ref for stitching", () => {
+  const r = run(wrap(listOf("x", messageB())), {});
+  assert.equal(r.messages[0].author, null);
+  assert.equal(r.messages[0].author_inherited, false);
+  assert.equal(r.messages[0].author_ref, A);
+});
+
+test("malformed percent-encoding and URL fragments do not abort extraction", () => {
+  const bad = li(D, article(D, `message-username-${D}`,
+    el("div", { class: "contents_c19a55" },
+      el("h3", { "aria-labelledby": `message-username-${D}` }, el("span", { id: `message-username-${D}` }, "Alice")),
+      el("div", { id: `message-content-${D}` }, "files"),
+    ),
+    el("div", { id: `message-accessories-${D}` },
+      el("a", { href: `https://cdn.discordapp.com/attachments/${CH}/${D}/100%.png` }),
+      el("a", { href: `https://cdn.discordapp.com/attachments/${CH}/${D}/report.pdf#page=2` }),
+    ),
+  ));
+  const r = run(wrap(listOf("x", bad)), {});
+  assert.equal(r.problem, null);
+  assert.deepEqual(r.messages[0].attachments.map((a) => a.filename), ["100%.png", "report.pdf"]);
+});
+
+test("non-breaking spaces are normalized in every rendered string", () => {
+  const nb = li(D, article(D, `message-username-${D}`,
+    el("div", {}, el("h3", { "aria-labelledby": `message-username-${D}` }, el("span", { id: `message-username-${D}` }, "Alice")),
+      el("div", { id: `message-content-${D}` }, "a\u00a0b\u202fc")),
+  ));
+  assert.equal(run(wrap(listOf("x", nb)), {}).messages[0].content, "a b c");
+});
+
+test("own reaction is detected from the pill's class, not localized label text", () => {
+  const r = run(fixture(), {});
+  const [mine, theirs] = r.messages[2].reactions;
+  assert.equal(mine.me, true);
+  assert.equal(theirs.me, false);
+});
+
+test("maxBytes counts UTF-8 bytes, not UTF-16 code units", () => {
+  const cjk = "漢".repeat(600); // 1200 code units, 1800 bytes
+  const row = li(D, article(D, `message-username-${D}`,
+    el("div", {}, el("h3", { "aria-labelledby": `message-username-${D}` }, el("span", { id: `message-username-${D}` }, "Alice")),
+      el("div", { id: `message-content-${D}` }, cjk)),
+  ));
+  const fits = run(wrap(listOf("x", row)), { maxBytes: 2400 });
+  const doesNot = run(wrap(listOf("x", row)), { maxBytes: 1800 });
+  assert.equal(fits.count, 1);
+  assert.equal(doesNot.count, 0);
+  assert.equal(doesNot.truncated, true);
+  assert.match(doesNot.problem ?? "", /exceeds maxBytes/);
+});
+
+test("two mounted lists without channelId is a problem, with channelId selects the right one", () => {
+  const other = "999000111222333444";
+  const threadRow = li(D, article(D, `message-username-${D}`,
+    el("div", {}, el("h3", { "aria-labelledby": `message-username-${D}` }, el("span", { id: `message-username-${D}` }, "Alice")),
+      el("div", { id: `message-content-${D}` }, "in thread")),
+  ));
+  threadRow.attrs.id = `chat-messages-${other}-${D}`;
+  const root = wrap(listOf("general", messageA()), listOf("my-thread", threadRow));
+  const ambiguous = run(root, {});
+  assert.match(ambiguous.problem ?? "", /More than one message list/);
+  const chosen = run(root, { channelId: other });
+  assert.equal(chosen.channel.label, "my-thread");
+  assert.deepEqual(chosen.messages.map((m) => m.content), ["in thread"]);
+  const missing = run(root, { channelId: "123" });
+  assert.match(missing.problem ?? "", /not in view/);
+  const invalid = run(root, { channelId: 'x"]' });
+  assert.match(invalid.problem ?? "", /snowflake/);
+});
+
+test("rows with unsafe id characters are skipped rather than interpolated into selectors", () => {
+  const weird = li(D, article(D, `message-username-${D}`, el("div", { id: `message-content-${D}` }, "x")));
+  weird.attrs.id = `chat-messages-${CH}-abc"def`;
+  const r = run(wrap(listOf("x", messageA(), weird)), {});
+  assert.deepEqual(r.messages.map((m) => m.id), [A]);
 });

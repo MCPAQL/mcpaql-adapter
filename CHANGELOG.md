@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `extractMessages` reads the Discord web client's rendered message list with full fidelity: complete text (no ~100-character accessibility-tree truncation), emoji as alt text, line breaks, mentions, links, grouped-message author attribution, reply linkage to the referenced message id, reactions with counts and own-reaction flag, attachment URLs and filenames (never downloaded), link embeds, edited flag, ISO timestamps
   - One implementation for two runtimes: the same function is unit-tested in Node against a dependency-free fake DOM and shipped to the browser as its own source text via `buildExtractMessagesExpression`
   - `DISCORD_SELECTORS` is the single selector table; every entry prefers stable attributes over Discord's hashed class names, and a test asserts each entry is used
-  - Caps applied inside the page (`maxMessages`, `maxBytes`) keep the newest messages and set `truncated`; a missing message list returns a named `problem` instead of empty success
+  - Caps applied inside the page (`maxMessages` and `maxBytes`, counted as UTF-8 bytes including the envelope) keep the newest messages and set `truncated`; a missing message list, an ambiguous split view without `channelId`, or a single message larger than the cap returns a named `problem` instead of empty success
+  - `author_ref` carries the group-start message id for grouped rows so a caller paging through a virtualized list can resolve authors across pages; system rows stay unattributed rather than inheriting a neighbor
+  - The "(edited)" decoration is reported as a flag, never as content; non-breaking spaces are normalized in every rendered string; own reactions are detected from markup, not localized label text
+  - A test transpiles the module the way `tsc` does and runs the result bare, so the shipped text is proven, not only the test runtime's
   - Test helper `test/helpers/fake-dom.ts`: minimal DOM with a small CSS selector subset
 
 - `@mcpaql/security` package (`src/security/`) — standalone security infrastructure ported from DollhouseMCP

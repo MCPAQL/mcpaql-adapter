@@ -54,17 +54,26 @@ export class FakeNode implements DomNode {
   }
 
   querySelector(selector: string): FakeNode | null {
-    return this.querySelectorAll(selector)[0] ?? null;
+    return this.find(selector, true)[0] ?? null;
   }
 
   querySelectorAll(selector: string): FakeNode[] {
-    const groups = selector.split(",").map((s) => s.trim()).filter(Boolean).map(parseSelector);
+    return this.find(selector, false);
+  }
+
+  private find(selector: string, firstOnly: boolean): FakeNode[] {
+    const groups = parseSelectorList(selector);
     const out: FakeNode[] = [];
-    const walk = (n: FakeNode): void => {
-      for (const c of n.children) {
-        if (groups.some((g) => matchesChain(c, g))) out.push(c);
-        walk(c);
+    const walk = (n: FakeNode): boolean => {
+      for (const c of n.childNodes) {
+        if (c.nodeType !== 1) continue;
+        if (groups.some((g) => matchesChain(c, g))) {
+          out.push(c);
+          if (firstOnly) return true;
+        }
+        if (walk(c)) return true;
       }
+      return false;
     };
     walk(this);
     return out;
@@ -74,6 +83,17 @@ export class FakeNode implements DomNode {
 /** Build an element: el("div", { id: "x" }, child, "text", ...) */
 export function el(tag: string, attrs: Record<string, string> = {}, ...kids: Array<FakeNode | string>): FakeNode {
   return new FakeNode(tag, attrs).append(...kids);
+}
+
+const selectorCache = new Map<string, Step[][]>();
+
+function parseSelectorList(selector: string): Step[][] {
+  let groups = selectorCache.get(selector);
+  if (!groups) {
+    groups = selector.split(",").map((s) => s.trim()).filter(Boolean).map(parseSelector);
+    selectorCache.set(selector, groups);
+  }
+  return groups;
 }
 
 interface Compound {
