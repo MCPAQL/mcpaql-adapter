@@ -12,11 +12,14 @@ import vm from "node:vm";
 import type { DiscordMessage, ExtractResult } from "../src/plugins/transport/discord-dom.js";
 import {
   DISCORD_HISTORY_SELECTORS,
-  buildScrollStepExpression,
+  buildMountedCountExpression,
+  buildScrollNudgeExpression,
+  mountedCount,
   olderThan,
   readMessages,
+  scrollNudge,
   scrollStep,
-  type ScrollStepResult,
+  type ScrollStepOutcome,
 } from "../src/plugins/transport/discord-history.js";
 import { channelPath, navigateExpression } from "../src/plugins/transport/discord-nav.js";
 import { FakeNode, el } from "./helpers/fake-dom.js";
@@ -61,7 +64,7 @@ function fakePage(history: DiscordMessage[], initial: number, perScroll: number)
     if (expr.startsWith("SCROLL")) {
       const before = mounted;
       mounted = Math.min(history.length, mounted + perScroll);
-      const r: ScrollStepResult = { before, after: mounted, moreAbove: mounted < history.length, problem: null };
+      const r: ScrollStepOutcome = { before, after: mounted, moreAbove: mounted < history.length, problem: null };
       return r;
     }
     if (expr.includes("location.assign")) return true;
@@ -75,7 +78,7 @@ const deps = (page: ReturnType<typeof fakePage>) => ({
   evaluate: page.evaluate,
   sleep: async () => {},
   extractExpression: () => "EXTRACT",
-  scrollExpression: () => "SCROLL",
+  scrollStep: (ev: (e: string) => Promise<unknown>) => ev("SCROLL") as Promise<ScrollStepOutcome>,
 });
 
 const history = Array.from({ length: 120 }, (_, i) => msg(i));
@@ -173,7 +176,7 @@ test("an extractor problem with no messages surfaces as a problem", async () => 
     if (expr === "EXTRACT") return windowOf([], "More than one message list is mounted");
     return true;
   };
-  const r = await readMessages({ evaluate, sleep: async () => {}, extractExpression: () => "EXTRACT", scrollExpression: () => "SCROLL" }, { channel_id: CH });
+  const r = await readMessages({ evaluate, sleep: async () => {}, extractExpression: () => "EXTRACT", scrollStep: async () => ({ before: 0, after: 0, moreAbove: false, problem: null }) }, { channel_id: CH });
   assert.equal(r.stop_reason, "problem");
   assert.match(r.problem ?? "", /More than one/);
   assert.equal(r.count, 0);
@@ -199,45 +202,81 @@ test("parameters are validated before anything is evaluated", async () => {
   assert.equal(calls.length, 0);
 });
 
-// --- scrollStep in the fake DOM ---
+// --- scrollNudge / mountedCount in the fake DOM; scrollStep with a fake evaluate ---
 
 function scrollerPage(rows: number, moreAbove: boolean) {
   const list = el("ol", { "data-list-id": "chat-messages" },
     ...(moreAbove ? [el("div", { class: "wrapper_x" }, el("div", { class: "blob_x" }))] : []),
     ...Array.from({ length: rows }, (_, i) => el("li", { id: `chat-messages-${CH}-${1000 + i}` })));
+  const sidebarScroller = el("div", { class: "scroller_abc" }, el("ul", {}, el("li", {}, "dm"))) as FakeNode & { scrollTop: number };
+  sidebarScroller.scrollTop = 0;
   const scroller = el("div", { class: "scroller_abc customTheme_abc" }, list) as FakeNode & { scrollTop: number; scrollHeight: number };
   scroller.scrollTop = 0;
   scroller.scrollHeight = 4000;
-  return { root: el("html", {}, el("body", {}, scroller)), scroller, list };
+  const outer = el("div", { class: "scrollerBase_abc" }, sidebarScroller, scroller) as FakeNode & { scrollTop: number };
+  outer.scrollTop = 0;
+  return { root: el("html", {}, el("body", {}, outer)), scroller, sidebarScroller, outer, list };
 }
 
-test("scrollStep moves the scroller, returns to the top, and reports growth and moreAbove", async () => {
-  const { root, scroller, list } = scrollerPage(5, true);
+test("scrollNudge moves the innermost scroller containing the list, then returns to the top", () => {
+  const { root, scroller, sidebarScroller, outer } = scrollerPage(5, true);
   const moves: number[] = [];
-  Object.defineProperty(scroller, "scrollTop", { get: () => moves[moves.length - 1] ?? 0, set: (v: number) => { moves.push(v); if (v === 0) list.append(el("li", { id: `chat-messages-${CH}-999` })); } });
-  const r = await scrollStep(root, DISCORD_HISTORY_SELECTORS, { growWaitMs: 500, pollMs: 10 });
-  assert.deepEqual(r, { before: 5, after: 6, moreAbove: true, problem: null });
-  assert.ok(moves[0] > 0 && moves[moves.length - 1] === 0, "a real movement, then back to the top");
+  Object.defineProperty(scroller, "scrollTop", { get: () => moves[moves.length - 1] ?? 0, set: (v: number) => { moves.push(v); } });
+  const r = scrollNudge(root, DISCORD_HISTORY_SELECTORS);
+  assert.deepEqual(r, { count: 5, moreAbove: true, problem: null });
+  assert.deepEqual(moves.map((m) => m > 0), [true, false], "a real movement, then back to the top");
+  assert.equal(sidebarScroller.scrollTop, 0, "the DM sidebar scroller is never touched");
+  assert.equal(outer.scrollTop, 0, "the outer container is never touched");
 });
 
-test("scrollStep reports no growth and no more history at the beginning", async () => {
+test("mountedCount reports rows and whether more history is indicated", () => {
   const { root } = scrollerPage(3, false);
-  const r = await scrollStep(root, DISCORD_HISTORY_SELECTORS, { growWaitMs: 30, pollMs: 10 });
-  assert.deepEqual(r, { before: 3, after: 3, moreAbove: false, problem: null });
+  assert.deepEqual(mountedCount(root, DISCORD_HISTORY_SELECTORS), { count: 3, moreAbove: false, problem: null });
 });
 
-test("scrollStep without a list or scroller is a problem", async () => {
-  const r = await scrollStep(el("html", {}), DISCORD_HISTORY_SELECTORS, { growWaitMs: 10, pollMs: 5 });
-  assert.match(r.problem ?? "", /No message list/);
+test("nudge and count without a list are problems", () => {
+  assert.match(scrollNudge(el("html", {}), DISCORD_HISTORY_SELECTORS).problem ?? "", /No message list/);
+  assert.match(mountedCount(el("html", {}), DISCORD_HISTORY_SELECTORS).problem ?? "", /No message list/);
 });
 
-test("scrollStep expression runs verbatim in a bare context with a document-shaped root", async () => {
+test("nudge and count expressions run verbatim in a bare context and are synchronous", () => {
   const { root } = scrollerPage(2, false);
-  const expr = buildScrollStepExpression({ growWaitMs: 20, pollMs: 5 });
-  assert.ok(!/\brequire\(|\bimport\b/.test(expr));
-  const ctx = { document: { querySelector: (q: string) => root.querySelector(q), querySelectorAll: (q: string) => root.querySelectorAll(q) }, setTimeout, Promise, Math };
-  const r = await vm.runInNewContext(expr, ctx);
-  assert.deepEqual(JSON.parse(JSON.stringify(r)), { before: 2, after: 2, moreAbove: false, problem: null });
+  const ctx = { document: { querySelector: (q: string) => root.querySelector(q), querySelectorAll: (q: string) => root.querySelectorAll(q) } };
+  for (const expr of [buildScrollNudgeExpression(), buildMountedCountExpression()]) {
+    assert.ok(!/\brequire\(|\bimport\b|setTimeout|Promise/.test(expr), "no module references and no in-page waiting");
+    const r = vm.runInNewContext(expr, ctx);
+    assert.deepEqual(JSON.parse(JSON.stringify(r)), { count: 2, moreAbove: false, problem: null });
+  }
+});
+
+test("scrollStep waits on the Node side and stops as soon as the count grows", async () => {
+  let count = 10;
+  let polls = 0;
+  const evaluate = async (expr: string): Promise<unknown> => {
+    if (expr === "NUDGE") return { count, moreAbove: true, problem: null };
+    polls++;
+    if (polls === 2) count = 40;
+    return { count, moreAbove: true, problem: null };
+  };
+  let t = 0;
+  const r = await scrollStep(evaluate, { nudgeExpression: "NUDGE", countExpression: "COUNT", sleep: async () => { t += 300; }, now: () => t, growWaitMs: 3000, pollMs: 300 });
+  assert.deepEqual(r, { before: 10, after: 40, moreAbove: true, problem: null });
+  assert.equal(polls, 2);
+});
+
+test("scrollStep gives up after growWaitMs and reports moreAbove from the last count", async () => {
+  const evaluate = async (expr: string): Promise<unknown> => ({ count: 10, moreAbove: expr !== "NUDGE" ? false : true, problem: null });
+  let t = 0;
+  const r = await scrollStep(evaluate, { nudgeExpression: "NUDGE", countExpression: "COUNT", sleep: async () => { t += 1000; }, now: () => t, growWaitMs: 3000, pollMs: 1000 });
+  assert.deepEqual(r, { before: 10, after: 10, moreAbove: false, problem: null });
+});
+
+test("scrollStep surfaces a nudge problem without polling", async () => {
+  let polls = 0;
+  const evaluate = async (expr: string): Promise<unknown> => { if (expr !== "NUDGE") polls++; return { count: 0, moreAbove: false, problem: "No message scroller found." }; };
+  const r = await scrollStep(evaluate, { nudgeExpression: "NUDGE", countExpression: "COUNT", sleep: async () => {} });
+  assert.match(r.problem ?? "", /scroller/);
+  assert.equal(polls, 0);
 });
 
 // --- navigation anchor ---
