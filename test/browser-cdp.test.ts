@@ -163,10 +163,30 @@ test("evaluate never requests a user gesture", async () => {
 
 // --- Helpers ---
 
-test("launchHint names the port and the flag", () => {
+test("launchHint names the port, the profile directory, and both platforms", () => {
   const hint = launchHint(9333);
   assert.match(hint, /--remote-debugging-port=9333/);
-  assert.match(hint, /macOS/);
+  assert.match(hint, /--user-data-dir="\$HOME\/\.mcpaql\/chrome-debug"/);
+  assert.match(hint, /macOS: open -n -a "Google Chrome" --args/);
+  assert.match(hint, /Linux: google-chrome/);
+  assert.match(hint, /136/);
+});
+
+test("discovery has one deadline: a slow response plus a stalled body cannot take two timeouts", async () => {
+  const slowThenStalled: FetchLike = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ ok: true, status: 200, json: () => new Promise(() => {}) }), 120);
+  });
+  const started = Date.now();
+  await assert.rejects(discoverTargets("127.0.0.1", 9222, slowThenStalled, 200), (err: unknown) => err instanceof CdpTransportError && err.code === "TRANSPORT_CDP_TIMEOUT");
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 320, `took ${elapsed}ms; the body read must get only what is left of the 200ms`);
+});
+
+test("the transport refuses a non-loopback host before touching the network", () => {
+  for (const host of ["0.0.0.0", "10.0.0.5", "chrome.example.com"]) {
+    assert.throws(() => new BrowserCdpTransport({ allowedOrigin: ORIGIN, host }), (err: unknown) => err instanceof CdpTransportError && err.code === "TRANSPORT_CDP_ORIGIN_REFUSED" && /loopback/.test(err.message));
+  }
+  for (const host of ["127.0.0.1", "localhost", "::1"]) new BrowserCdpTransport({ allowedOrigin: ORIGIN, host });
 });
 
 test("originOf returns origin or null", () => {
@@ -214,7 +234,7 @@ test("selectTarget errors only when every matching tab has no debugger URL", () 
 test("discoverTargets: connection refused becomes PORT_CLOSED with launch hint", async () => {
   const refusing: FetchLike = async () => { throw new Error("ECONNREFUSED"); };
   const err = await expectCode(discoverTargets("127.0.0.1", 9222, refusing, 200), "TRANSPORT_CDP_PORT_CLOSED");
-  assert.match(err.message, /--remote-debugging-port=9222/);
+  assert.match(err.message, /--remote-debugging-port=9222 --user-data-dir=/);
 });
 
 test("discoverTargets: non-OK HTTP becomes PROTOCOL_ERROR", async () => {

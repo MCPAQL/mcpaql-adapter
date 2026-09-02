@@ -34,6 +34,16 @@ export const DEFAULT_CDP_PORT = 9222;
 /** Default host; loopback only — never a remote browser. */
 export const DEFAULT_CDP_HOST = "127.0.0.1";
 
+/** The hosts the transport will attach to: a DevTools port on another machine would hand that network the user's session. */
+export function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+/** `host:port` for a URL, with an IPv6 literal bracketed. */
+export function devtoolsAuthority(host: string, port: number): string {
+  return `${host.includes(":") ? `[${host}]` : host}:${port}`;
+}
+
 /** Default per-call timeout for discovery, attach, and evaluate. */
 export const DEFAULT_CDP_TIMEOUT_MS = 10_000;
 
@@ -147,13 +157,26 @@ export interface EvaluateOptions {
 }
 
 /**
- * The exact Chrome launch flag a user needs when the port is closed.
- * Printed in the PORT_CLOSED error so setup is one copy-paste.
+ * Where the hint tells the user to keep the debug-enabled profile. Chrome
+ * 136 and later refuse `--remote-debugging-port` on the default profile, so
+ * the profile must be a separate directory; it has its own logins.
+ */
+export const DEFAULT_CHROME_PROFILE_DIR = "$HOME/.mcpaql/chrome-debug";
+
+/**
+ * The exact Chrome launch commands a user needs when the port is closed,
+ * for macOS and Linux. Printed in the PORT_CLOSED error so setup is one
+ * copy-paste. Both flags are required: Chrome 136+ opens the port only
+ * when `--user-data-dir` names a non-default directory. On macOS `open -n`
+ * starts a new instance; without it a running Chrome is merely activated
+ * and the flags never reach a process.
  */
 export function launchHint(port: number = DEFAULT_CDP_PORT): string {
-  return `Start Chrome with remote debugging enabled, e.g. ` +
-    `macOS: open -a "Google Chrome" --args --remote-debugging-port=${port} ; ` +
-    `Linux: google-chrome --remote-debugging-port=${port}`;
+  const flags = `--remote-debugging-port=${port} --user-data-dir="${DEFAULT_CHROME_PROFILE_DIR}"`;
+  return `Start Chrome with remote debugging enabled and a separate profile (Chrome 136+ requires both flags; sign in there once; ` +
+    `this is a second Chrome instance, so your normal Chrome can stay open). ` +
+    `macOS: open -n -a "Google Chrome" --args ${flags} ; ` +
+    `Linux: google-chrome ${flags}`;
 }
 
 /**
@@ -167,6 +190,11 @@ export function originOf(url: string): string | null {
   }
 }
 
+/** Page targets at `allowedOrigin`: the one matching rule, shared with the startup probe. */
+export function matchingPages(targets: CdpTarget[], allowedOrigin: string): CdpTarget[] {
+  return targets.filter((t) => t.type === "page" && typeof t.url === "string" && originOf(t.url) === allowedOrigin);
+}
+
 /**
  * Choose the page target whose origin matches `allowedOrigin`.
  * Refuses non-page targets (workers, extensions) and other origins.
@@ -175,7 +203,7 @@ export function originOf(url: string): string | null {
  */
 export function selectTarget(targets: CdpTarget[], allowedOrigin: string): CdpTarget {
   const pages = targets.filter((t) => t.type === "page" && typeof t.url === "string");
-  const matches = pages.filter((t) => originOf(t.url) === allowedOrigin);
+  const matches = matchingPages(pages, allowedOrigin);
   const attachable = matches.find((t) => typeof t.webSocketDebuggerUrl === "string" && t.webSocketDebuggerUrl !== "");
   if (attachable) return attachable;
   if (matches.length > 0) {
@@ -207,7 +235,9 @@ export async function discoverTargets(
   fetchImpl: FetchLike,
   timeoutMs: number,
 ): Promise<CdpTarget[]> {
-  const url = `http://${host}:${port}/json/list`;
+  const url = `http://${devtoolsAuthority(host, port)}/json/list`;
+  // One deadline for the whole discovery: the request and the body read share `timeoutMs`.
+  const deadline = Date.now() + timeoutMs;
   let response: Awaited<ReturnType<FetchLike>>;
   try {
     response = await withTimeout(fetchImpl(url), timeoutMs, "discovery");
@@ -228,7 +258,7 @@ export async function discoverTargets(
   }
   let body: unknown;
   try {
-    body = await withTimeout(response.json(), timeoutMs, "discovery body");
+    body = await withTimeout(response.json(), Math.max(1, deadline - Date.now()), "discovery body");
   } catch (err) {
     if (err instanceof CdpTransportError) throw err;
     throw new CdpTransportError(
@@ -264,7 +294,7 @@ function describe(err: unknown): string {
   }
   const text = String(err);
   return text === "[object Object]" || text === "[object ErrorEvent]" || text === "[object Event]"
-    ? "connection refused or upgrade rejected (is Chrome running with --remote-debugging-port, and is this the same user?)"
+    ? "connection refused or upgrade rejected (is Chrome running with --remote-debugging-port and --user-data-dir, and is this the same user?)"
     : text;
 }
 
@@ -348,9 +378,17 @@ export class BrowserCdpTransport {
         `allowedOrigin must be a bare origin like https://example.com (got ${JSON.stringify(config.allowedOrigin)}).`,
       );
     }
+    const host = config.host ?? DEFAULT_CDP_HOST;
+    if (!isLoopbackHost(host)) {
+      throw new CdpTransportError(
+        "TRANSPORT_CDP_ORIGIN_REFUSED",
+        `host must be loopback (127.0.0.1, localhost, or ::1); got ${JSON.stringify(host)}. This transport never attaches to a remote browser.`,
+        { host },
+      );
+    }
     this.config = {
       allowedOrigin: config.allowedOrigin,
-      host: config.host ?? DEFAULT_CDP_HOST,
+      host,
       port: config.port ?? DEFAULT_CDP_PORT,
       timeoutMs: config.timeoutMs ?? DEFAULT_CDP_TIMEOUT_MS,
       maxResultBytes: config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES,
@@ -613,4 +651,5 @@ function defaultSocketFactory(url: string): WebSocketLike {
   return new Ctor(url);
 }
 
-const defaultFetch: FetchLike = (url) => fetch(url);
+/** The production fetch; exported so other callers of `discoverTargets` use the same one. */
+export const defaultFetch: FetchLike = (url) => fetch(url);
