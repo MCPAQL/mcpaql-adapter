@@ -199,6 +199,16 @@ test("a listing name written by someone else is classified, and masked only when
   const masked = (await runDiscordOperation({ evaluate: page }, "list_dms", { redact: true })) as { data: { items: Array<{ name: string }>; highest_severity: string } };
   if (masked.data.highest_severity === "high" || masked.data.highest_severity === "critical") assert.equal(masked.data.items[0].name, "[CONTENT_BLOCKED]");
   assert.equal(masked.data.items[1].name, "friends");
+  const guildPage = async () => ({ guild: { id: G, name: hostile }, items: [{ id: CH, name: "general", kind: "text channel", category: null, href: "/x" }], count: 1, truncated: false, problem: null });
+  const guild = (await runDiscordOperation({ evaluate: guildPage }, "list_channels", {})) as { data: { guild: { name: string }; flags: Array<{ item_id?: string; field: string }>; flagged_ids: string[]; highest_severity: string | null } };
+  assert.equal(guild.data.flags.length, 1, "the server's own name is classified too");
+  assert.equal(guild.data.flags[0].item_id, G);
+  assert.equal(guild.data.flags[0].field, "listing.name");
+  assert.deepEqual(guild.data.flagged_ids, [G]);
+  assert.ok(guild.data.highest_severity !== null);
+  assert.equal(guild.data.guild.name, hostile, "not redacted by default");
+  const guildMasked = (await runDiscordOperation({ evaluate: guildPage }, "list_channels", { redact: true })) as { data: { guild: { name: string }; highest_severity: string } };
+  if (guildMasked.data.highest_severity === "high" || guildMasked.data.highest_severity === "critical") assert.equal(guildMasked.data.guild.name, "[CONTENT_BLOCKED]");
   const shape = failure(await runDiscordOperation({ evaluate: async () => "not an object" }, "list_dms", {}));
   assert.equal(shape.code, "INTERNAL_ERROR");
 });
@@ -248,17 +258,23 @@ test("the runtime guard refuses an expression that is not read-only for the oper
   assert.equal(scanExpression('(() => document.title)()', []), null);
   assert.match(scanExpression('(() => { fetch("/api"); })()', []) ?? "", /forbidden primitive "fetch\("/);
   assert.match(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); })()', []) ?? "", /without declaring navigate-same-origin/);
-  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); })()', ["navigate-same-origin"]), null);
+  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1520443442982031486"); })()', ["navigate-same-origin"]), null);
   assert.match(scanExpression('(() => { el.scrollTop = 0; })()', ["navigate-same-origin"]) ?? "", /scroll-message-list/);
   // The effects mean more than their primitives.
-  assert.match(scanExpression('(() => { history.pushState({}, "", "/settings"); })()', ["navigate-same-origin"]) ?? "", /not a \/channels\/ path/);
+  assert.match(scanExpression('(() => { history.pushState({}, "", "/settings"); })()', ["navigate-same-origin"]) ?? "", /not a channel path/);
+  assert.match(scanExpression('(() => { history.pushState({}, "", "/channels/../settings"); })()', ["navigate-same-origin"]) ?? "", /not a channel path/);
+  assert.match(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); })()', ["navigate-same-origin"]) ?? "", /not a channel path/, "a channel id must be a snowflake");
+  assert.match(scanExpression("(() => { history.pushState({}, '', '/channels/@me/1520443442982031486'); })()", ["navigate-same-origin"]) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { const p = "/channels/@me/1520443442982031486"; history.pushState({}, "", p); })()', ["navigate-same-origin"]) ?? "", /cannot validate/);
+  assert.match(scanExpression('(() => { history.replaceState(null, "", "/channels/@me/1520443442982031486"); })()', ["navigate-same-origin"]) ?? "", /cannot validate/);
   assert.match(scanExpression('(() => { dispatchEvent(new Event("click")); })()', ["navigate-same-origin", "scroll-message-list"]) ?? "", /"click" event/);
   assert.match(scanExpression('(() => { const t = "popstate"; dispatchEvent(new PopStateEvent(t)); })()', ["navigate-same-origin"]) ?? "", /not an inline literal/);
   assert.match(scanExpression('(() => { dispatchEvent(new PopStateEvent("popstate")); })()', ["scroll-message-list"]) ?? "", /without declaring navigate-same-origin/);
   assert.match(scanExpression('(() => { dispatchEvent(new Event("popstate")); })()', ["scroll-message-list"]) ?? "", /"popstate" event/);
   assert.match(scanExpression('(() => { const e = new KeyboardEvent("keydown"); })()', []) ?? "", /forbidden primitive/);
   assert.match(scanExpression('(() => { const e = new Event("submit"); })()', ["scroll-message-list"]) ?? "", /constructs a "submit" event/);
-  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1"); dispatchEvent(new PopStateEvent("popstate", { state: {} })); })()', ["navigate-same-origin"]), null);
+  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/@me/1520443442982031486"); dispatchEvent(new PopStateEvent("popstate", { state: {} })); })()', ["navigate-same-origin"]), null);
+  assert.equal(scanExpression('(() => { history.pushState({}, "", "/channels/1210290974601773056/1520443442982031486/1544685390995132426"); })()', ["navigate-same-origin"]), null);
   assert.equal(scanExpression('(() => { s.scrollTop = 0; s.dispatchEvent(new Event("scroll")); })()', ["scroll-message-list"]), null);
 
   let reached = 0;
