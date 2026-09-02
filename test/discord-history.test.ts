@@ -23,30 +23,8 @@ import {
   type ScrollStepOutcome,
 } from "../src/plugins/transport/discord-history.js";
 import { channelPath, navigateExpression } from "../src/plugins/transport/discord-nav.js";
+import { CH, G, msg } from "./helpers/discord-fixtures.js";
 import { FakeNode, el } from "./helpers/fake-dom.js";
-
-const CH = "1520443442982031486";
-const G = "1210290974601773056";
-
-function msg(n: number, extra: Partial<DiscordMessage> = {}): DiscordMessage {
-  return {
-    id: String(1_544_000_000_000_000_000n + BigInt(n)),
-    channel_id: CH,
-    author: "Alice",
-    author_inherited: false,
-    author_ref: null,
-    timestamp: null,
-    content: `m${n}`,
-    reply_to: null,
-    reply_label: null,
-    reactions: [],
-    attachments: [],
-    embeds: [],
-    links: [],
-    edited: false,
-    ...extra,
-  };
-}
 
 function windowOf(msgs: DiscordMessage[], problem: string | null = null): ExtractResult {
   return { channel: { id: CH, label: "Test Friend" }, messages: msgs, count: msgs.length, scanned: msgs.length, truncated: false, problem };
