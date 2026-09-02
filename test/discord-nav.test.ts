@@ -338,6 +338,27 @@ test("openChannel fails with a named error when the channel never mounts", async
   );
 });
 
+test("an anchored open requires the anchored row, so a stale window of the same channel still navigates", async () => {
+  const anchor = "1544685390995132426";
+  const expr = mountedExpression(C1, anchor);
+  const run = (rows: string[]): boolean => {
+    const list = el("ol", { "data-list-id": "chat-messages" }, ...rows.map((id) => el("li", { id: `chat-messages-${C1}-${id}` })));
+    const root = el("html", {}, list);
+    return vm.runInNewContext(expr, { document: { querySelector: (q: string) => root.querySelector(q) }, location: { pathname: `/channels/${G}/${C1}/${anchor}` } }) as boolean;
+  };
+  assert.equal(run([DM1]), false, "rows of the channel without the anchor do not count");
+  assert.equal(run([DM1, anchor]), true);
+
+  let navigated = false;
+  const { calls, evaluate } = fakeEvaluate(() => (expr) => {
+    if (expr.includes("pushState")) { navigated = true; return true; }
+    return expr.includes(anchor) ? navigated : true; // channel rows are mounted, the anchor only after navigation
+  });
+  const r = await openChannel(evaluate, { guildId: G, channelId: C1, messageId: anchor }, { sleep: noSleep, timeoutMs: 1000, pollMs: 0 });
+  assert.equal(r.alreadyOpen, false);
+  assert.ok(calls.some((c) => c.includes("pushState")));
+});
+
 test("openChannel never evaluates an unvalidated id", async () => {
   const { calls, evaluate } = fakeEvaluate(() => () => true);
   await assert.rejects(openChannel(evaluate, { channelId: "evil" }), /snowflake/);

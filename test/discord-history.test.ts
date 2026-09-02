@@ -55,23 +55,30 @@ function windowOf(msgs: DiscordMessage[], problem: string | null = null): Extrac
  * A fake page: `history` is oldest→newest; `mounted` rows grow by `perScroll`
  * on each scroll step, newest end first (like Discord).
  */
-function fakePage(history: DiscordMessage[], initial: number, perScroll: number) {
+function fakePage(history: DiscordMessage[], initial: number, perScroll: number, options: { virtualizedWindow?: number } = {}) {
   let mounted = Math.min(initial, history.length);
+  let top = history.length - mounted; // index of the oldest mounted row
   const calls: string[] = [];
-  const evaluate = async (expr: string): Promise<unknown> => {
+  const budgets: Array<number | undefined> = [];
+  let navigated = false;
+  const evaluate = async (expr: string, o?: { timeoutMs?: number }): Promise<unknown> => {
     calls.push(expr);
-    if (expr.startsWith("EXTRACT")) return windowOf(history.slice(history.length - mounted));
+    budgets.push(o?.timeoutMs);
+    if (expr.startsWith("EXTRACT")) return windowOf(history.slice(top, top + mounted));
     if (expr.startsWith("SCROLL")) {
       const before = mounted;
-      mounted = Math.min(history.length, mounted + perScroll);
-      const r: ScrollStepOutcome = { before, after: mounted, moreAbove: mounted < history.length, problem: null };
+      const grow = Math.min(perScroll, top);
+      top -= grow;
+      mounted = options.virtualizedWindow ? Math.min(options.virtualizedWindow, mounted + grow) : mounted + grow;
+      const r: ScrollStepOutcome = { before, after: mounted, moreAbove: top > 0, problem: null };
       return r;
     }
-    if (expr.includes("pushState")) return true;
-    if (expr.includes("chat-messages-")) return true; // mounted probe
+    if (expr.includes("pushState")) { navigated = true; return true; }
+    if (expr.includes('li[id="')) return navigated; // anchored probe: only after navigation
+    if (expr.includes("chat-messages-")) return true; // plain mounted probe
     throw new Error(`unexpected expression ${expr.slice(0, 40)}`);
   };
-  return { calls, evaluate, get mounted() { return mounted; } };
+  return { calls, budgets, evaluate, get mounted() { return mounted; } };
 }
 
 const deps = (page: ReturnType<typeof fakePage>) => ({
@@ -145,14 +152,47 @@ test("resuming with the cursor continues without gaps or duplicates", async () =
   assert.deepEqual(ids, Array.from({ length: 50 }, (_, i) => `m${119 - i}`));
 });
 
-test("scan_cap stops the op as truncated with a cursor", async () => {
+test("scan_cap counts distinct rows once across overlapping windows and stops as truncated with a cursor", async () => {
   const page = fakePage(history, 20, 30);
   const r = await readMessages(deps(page), { channel_id: CH, limit: 100, scan_cap: 60 });
   assert.equal(r.stop_reason, "scan_cap");
   assert.equal(r.complete, false);
   assert.equal(r.truncated, true);
-  assert.ok(r.count > 0 && r.count < 100);
+  assert.equal(r.scanned, 60, "20 + 30 + 10 distinct rows, not 20 + 50 + ...");
+  assert.equal(r.count, 60);
   assert.equal(r.cursor, r.messages[r.messages.length - 1].id);
+});
+
+test("scan_cap bounds even the first window and is never reported as filled", async () => {
+  const page = fakePage(history, 50, 30);
+  const r = await readMessages(deps(page), { channel_id: CH, limit: 50, scan_cap: 10 });
+  assert.equal(r.stop_reason, "scan_cap");
+  assert.equal(r.scanned, 10);
+  assert.equal(r.count, 10);
+  assert.equal(r.complete, false);
+  assert.equal(r.messages[0].content, "m119", "the newest rows are the ones admitted");
+});
+
+test("a limit that fits inside scan_cap is filled, not capped", async () => {
+  const page = fakePage(history, 50, 30);
+  const r = await readMessages(deps(page), { channel_id: CH, limit: 5, scan_cap: 10 });
+  assert.equal(r.stop_reason, "filled");
+  assert.equal(r.count, 5);
+});
+
+test("a virtualized list that swaps rows without growing still counts as progress", async () => {
+  const page = fakePage(history, 30, 30, { virtualizedWindow: 30 });
+  const r = await readMessages(deps(page), { channel_id: CH, limit: 90 });
+  assert.equal(r.stop_reason, "filled");
+  assert.equal(r.count, 90);
+});
+
+test("a step that cannot fit in the remaining budget is not started, and evaluates carry the budget", async () => {
+  const page = fakePage(history, 20, 30);
+  let t = 0;
+  const r = await readMessages({ ...deps(page), now: () => (t += 300), scrollStep: async (_ev, growWaitMs) => { assert.ok(growWaitMs <= 3000 && growWaitMs >= 400, `step budget ${growWaitMs}`); return { before: 20, after: 50, moreAbove: true, problem: null }; } }, { channel_id: CH, limit: 100, time_budget_ms: 1500 });
+  assert.equal(r.stop_reason, "time_budget");
+  assert.ok(page.budgets.filter((b) => b !== undefined).every((b) => b! > 0 && b! <= 1500), `budgets ${page.budgets.join(",")}`);
 });
 
 test("time budget stops the op as truncated", async () => {
@@ -255,10 +295,12 @@ test("nudge and count expressions run verbatim in a bare context and are synchro
   }
 });
 
-test("scrollStep waits on the Node side and stops as soon as the count grows", async () => {
+test("scrollStep waits on the Node side, bounds each evaluate by what is left, and stops as soon as the count grows", async () => {
   let count = 10;
   let polls = 0;
-  const evaluate = async (expr: string): Promise<unknown> => {
+  const seenBudgets: number[] = [];
+  const evaluate = async (expr: string, o?: { timeoutMs?: number }): Promise<unknown> => {
+    seenBudgets.push(o?.timeoutMs ?? -1);
     if (expr === "NUDGE") return { count, moreAbove: true, problem: null };
     polls++;
     if (polls === 2) count = 40;
@@ -268,6 +310,7 @@ test("scrollStep waits on the Node side and stops as soon as the count grows", a
   const r = await scrollStep(evaluate, { nudgeExpression: "NUDGE", countExpression: "COUNT", sleep: async () => { t += 300; }, now: () => t, growWaitMs: 3000, pollMs: 300 });
   assert.deepEqual(r, { before: 10, after: 40, moreAbove: true, problem: null });
   assert.equal(polls, 2);
+  assert.ok(seenBudgets.every((b) => b > 0 && b <= 3000), `budgets ${seenBudgets.join(",")}`);
 });
 
 test("scrollStep gives up after growWaitMs and reports moreAbove from the last count", async () => {
