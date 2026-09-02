@@ -28,6 +28,8 @@ export const DISCORD_SELECTORS = {
   messageList: 'ol[data-list-id="chat-messages"]',
   /** Message rows; id is `chat-messages-<channelId>-<messageId>`. Date dividers are excluded by the id prefix. */
   messageItem: 'li[id^="chat-messages-"]',
+  /** Prefix of a message row id (marker, not a selector); the channel id follows it. */
+  messageRowPrefix: "chat-messages-",
   /** The message article; `aria-labelledby` names the group's username element. */
   article: '[role="article"]',
   /**
@@ -186,10 +188,45 @@ export interface DomNode {
 }
 
 /**
+ * Text of a node with emoji images rendered as their alt text, `<br>` as a
+ * newline, elements whose class contains `skipClassStem` omitted, and the
+ * non-breaking-space family normalized. Shared by every Discord page script;
+ * {@link buildPageExpression} inlines its source ahead of the caller.
+ * SELF-CONTAINED: no references to module scope.
+ */
+export function renderText(node: DomNode | null, skipClassStem: string | null): string {
+  if (!node) return "";
+  const parts: string[] = [];
+  const walk = (n: DomNode): void => {
+    if (n.nodeType === 3) {
+      parts.push(n.nodeValue ?? "");
+      return;
+    }
+    if (n.nodeType !== 1) return;
+    if (skipClassStem !== null && (n.getAttribute("class") ?? "").includes(skipClassStem)) return;
+    const tag = (n.tagName ?? "").toUpperCase();
+    if (tag === "IMG") {
+      const alt = n.getAttribute("alt");
+      const name = n.getAttribute("data-name");
+      parts.push(alt && alt.trim() !== "" ? alt : (name ?? ""));
+      return;
+    }
+    if (tag === "BR") {
+      parts.push("\n");
+      return;
+    }
+    const kids = n.childNodes;
+    for (let i = 0; i < kids.length; i++) walk(kids[i]);
+  };
+  walk(node);
+  return parts.join("").replace(/[\u00a0\u2007\u202f]/g, " ");
+}
+
+/**
  * Extract messages from a Discord chat view.
  *
- * SELF-CONTAINED: no references to module scope. Shipped to the browser via
- * `Function.prototype.toString`. Keep every helper inside.
+ * SELF-CONTAINED apart from {@link renderText}, which the builder inlines.
+ * Shipped to the browser via `Function.prototype.toString`.
  */
 export function extractMessages(
   root: DomRoot,
@@ -216,36 +253,6 @@ export function extractMessages(
     return n;
   };
 
-  /** Text with emoji images rendered as their alt text and <br> as newlines. */
-  const renderText = (node: DomNode | null): string => {
-    if (!node) return "";
-    const parts: string[] = [];
-    const walk = (n: DomNode): void => {
-      if (n.nodeType === 3) {
-        parts.push(n.nodeValue ?? "");
-        return;
-      }
-      if (n.nodeType !== 1) return;
-      if ((n.getAttribute("class") ?? "").includes(sel.editedClass)) return;
-      const tag = (n.tagName ?? "").toUpperCase();
-      if (tag === "IMG") {
-        const alt = n.getAttribute("alt");
-        const name = n.getAttribute("data-name");
-        parts.push(alt && alt.trim() !== "" ? alt : (name ?? ""));
-        return;
-      }
-      if (tag === "BR") {
-        parts.push("\n");
-        return;
-      }
-      const kids = n.childNodes;
-      for (let i = 0; i < kids.length; i++) walk(kids[i]);
-    };
-    walk(node);
-    // Discord pads with non-breaking spaces; normalize every rendered string once.
-    return parts.join("").replace(/[\u00a0\u2007\u202f]/g, " ");
-  };
-
   const idSuffix = (id: string | null, prefix: string): string | null =>
     id && id.startsWith(prefix) ? id.slice(prefix.length) : null;
 
@@ -265,7 +272,7 @@ export function extractMessages(
   let list: DomNode | null = null;
   if (opts.channelId !== null) {
     if (!safeToken(opts.channelId)) return fail("channelId must be a Discord snowflake.");
-    list = lists.find((l) => l.querySelector(`li[id^="chat-messages-${opts.channelId}-"]`) !== null) ?? null;
+    list = lists.find((l) => l.querySelector(`li[id^="${sel.messageRowPrefix}${opts.channelId}-"]`) !== null) ?? null;
     if (!list) {
       return fail(`Channel ${opts.channelId} is not in view. Open it in Discord and retry.`);
     }
@@ -309,7 +316,7 @@ export function extractMessages(
     let authorInherited = false;
     let authorRef: string | null = null;
     if (header) {
-      author = renderText(header.querySelector(sel.username)).trim() || null;
+      author = renderText(header.querySelector(sel.username), sel.editedClass).trim() || null;
     } else {
       // Grouped messages carry `aria-labelledby="message-username-<groupStartId> ..."`.
       // System rows have no such token and keep author null; nothing is guessed.
@@ -320,7 +327,7 @@ export function extractMessages(
       if (safeToken(usernameId)) {
         authorRef = usernameId.slice(sel.usernameIdPrefix.length);
         const usernameNode = root.querySelector(`#${usernameId}`);
-        author = usernameNode ? (renderText(usernameNode).trim() || null) : null;
+        author = usernameNode ? (renderText(usernameNode, sel.editedClass).trim() || null) : null;
         authorInherited = author !== null;
       }
     }
@@ -331,7 +338,7 @@ export function extractMessages(
     // content is matched by exact id within this row, never by prefix.
     const contentNode = li.querySelector(`[id="${sel.contentIdPrefix}${messageId}"]`);
     // Not trimmed: leading indentation and trailing newlines inside code blocks are content.
-    const content = renderText(contentNode);
+    const content = renderText(contentNode, sel.editedClass);
 
     const replyCtx = li.querySelector(sel.replyContext);
     const replyPreview = replyCtx ? replyCtx.querySelector(sel.replyContent) : null;
@@ -345,8 +352,8 @@ export function extractMessages(
     if (accessories) {
       for (const r of qsa(accessories.querySelector(sel.reactionsGroup), sel.reaction)) {
         const inner = r.querySelector(sel.reactionInner) ?? r;
-        const emoji = renderText(inner.querySelector(sel.emojiImage)).trim();
-        const count = Number.parseInt(renderText(inner.querySelector(sel.reactionCount)).trim(), 10);
+        const emoji = renderText(inner.querySelector(sel.emojiImage), sel.editedClass).trim();
+        const count = Number.parseInt(renderText(inner.querySelector(sel.reactionCount), sel.editedClass).trim(), 10);
         const label = attr(inner, "aria-label") ?? "";
         reactions.push({
           emoji: emoji || label.split(",")[0].trim(),
@@ -372,10 +379,10 @@ export function extractMessages(
       for (const e of qsa(accessories, sel.embed)) {
         const titleLink = e.querySelector(sel.embedTitleLink);
         embeds.push({
-          provider: renderText(e.querySelector(sel.embedProvider)).trim() || null,
-          title: renderText(titleLink).trim() || null,
+          provider: renderText(e.querySelector(sel.embedProvider), sel.editedClass).trim() || null,
+          title: renderText(titleLink, sel.editedClass).trim() || null,
           url: attr(titleLink, "href"),
-          description: renderText(e.querySelector(sel.embedDescription)).trim() || null,
+          description: renderText(e.querySelector(sel.embedDescription), sel.editedClass).trim() || null,
         });
       }
     }
@@ -430,20 +437,30 @@ export function extractMessages(
 }
 
 /**
- * Build the expression the transport evaluates in the page. The extractor's
- * own source is inlined, so the browser runs exactly what the tests ran.
+ * Build the expression a transport evaluates in the page: the caller's own
+ * source, preceded by the sources of the self-contained helpers it uses,
+ * applied to `document` and the given JSON arguments.
+ *
+ * Some TypeScript runtimes (esbuild with keepNames, used by tsx) wrap inner
+ * functions in a `__name(fn, "name")` helper that does not exist in the
+ * page; the compiled `tsc` output has none. An identity shim is defined only
+ * when a source references it, so both runtimes ship code that runs bare.
  */
+export function buildPageExpression(
+  fn: (...args: never[]) => unknown,
+  args: readonly unknown[],
+  helpers: ReadonlyArray<(...args: never[]) => unknown> = [],
+): string {
+  const sources = [...helpers, fn].map((f) => f.toString());
+  const shim = sources.some((src) => /\b__name\(/.test(src)) ? "const __name = (fn) => fn; " : "";
+  const helperDefs = helpers.map((h) => `const ${h.name} = ${h.toString()}; `).join("");
+  return `(() => { ${shim}${helperDefs}return (${fn.toString()})(document, ${args.map((a) => JSON.stringify(a)).join(", ")}); })()`;
+}
+
+/** Build the message-extraction expression. */
 export function buildExtractMessagesExpression(
   opts: ExtractOptions = {},
   selectors: DiscordSelectors = DISCORD_SELECTORS,
 ): string {
-  const source = extractMessages.toString();
-  // Some TypeScript runtimes (esbuild with keepNames, used by tsx) wrap inner
-  // functions in a `__name(fn, "name")` helper that does not exist in the
-  // page. The compiled `tsc` output has no such helper. Define an identity
-  // shim only when the source references it, so both runtimes ship code that
-  // runs in a bare browser context.
-  const shim = /\b__name\(/.test(source) ? "const __name = (fn) => fn; " : "";
-  const args = `document, ${JSON.stringify(selectors)}, ${JSON.stringify(resolveExtractOptions(opts))}`;
-  return `(() => { ${shim}return (${source})(${args}); })()`;
+  return buildPageExpression(extractMessages, [selectors, resolveExtractOptions(opts)], [renderText]);
 }

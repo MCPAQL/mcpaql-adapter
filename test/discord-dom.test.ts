@@ -251,7 +251,7 @@ test("a grouped message outside the cap window still resolves its author via the
 // --- Failure shape ---
 
 test("no message list yields a problem string, not an exception or empty success", () => {
-  const r = extractMessages(el("html", {}, el("body", {}, "nothing")), DISCORD_SELECTORS, {});
+  const r = run(el("html", {}, el("body", {}, "nothing")), {});
   assert.equal(r.count, 0);
   assert.match(r.problem ?? "", /No message list/);
 });
