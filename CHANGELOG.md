@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discord listing and navigation (`src/plugins/transport/discord-nav.ts`) — third piece of the read-only Discord adapter (#38, closes #41)
+  - In-page `listDms` (real conversations only: id, name, kind, presence, unread), `listGuilds` (server rail with unread prefixes stripped and the raw label kept), `listChannels` (channels with kind and enclosing category, plus the open server's id and name); each returns `{items, count, truncated, problem}` and is shipped to the browser as its own source text with the shared `plainText` helper inlined
+  - Node-side `openChannel(evaluate, target)`: short-circuits when the channel is already mounted, otherwise assigns a same-origin path built only from validated snowflake ids, tolerates the execution context being replaced during navigation, and polls for the channel's message list under a time budget; never accepts a caller URL
+  - `DISCORD_NAV_SELECTORS` is the single selector table; every selector-valued entry is parse-tested
+  - Documented side effect, the only one in the module: opening a channel marks it read, exactly as clicking it does
 - Discord DOM extractor (`src/plugins/transport/discord-dom.ts`) — second piece of the read-only Discord adapter (#38, closes #40)
   - `extractMessages` reads the Discord web client's rendered message list with full fidelity: complete text (no ~100-character accessibility-tree truncation), emoji as alt text, line breaks, mentions, links, grouped-message author attribution, reply linkage to the referenced message id, reactions with counts and own-reaction flag, attachment URLs and filenames (never downloaded), link embeds, edited flag, ISO timestamps
   - One implementation for two runtimes: the same function is unit-tested in Node against a dependency-free fake DOM and shipped to the browser as its own source text via `buildExtractMessagesExpression`
