@@ -21,6 +21,7 @@ import {
   selectTarget,
   type CdpTarget,
   type FetchLike,
+  type SocketEvent,
   type WebSocketLike,
 } from "../src/plugins/transport/browser-cdp.js";
 
@@ -28,7 +29,7 @@ const ORIGIN = "https://discord.com";
 
 // --- Fakes ---
 
-type Listener = (event: unknown) => void;
+type Listener = (event: SocketEvent) => void;
 
 /**
  * In-memory WebSocket double. `respond` decides what the "browser" answers
@@ -56,10 +57,10 @@ class FakeSocket implements WebSocketLike {
     const list = this.listeners.get(type) ?? [];
     list.push(listener);
     this.listeners.set(type, list);
-    if (type === "open" && this.autoOpen) queueMicrotask(() => listener(undefined));
-    if (type === "error" && this.autoError !== undefined) queueMicrotask(() => listener(this.autoError));
+    if (type === "open" && this.autoOpen) queueMicrotask(() => listener({}));
+    if (type === "error" && this.autoError !== undefined) queueMicrotask(() => listener({ error: this.autoError }));
   }
-  emit(type: string, event: unknown): void {
+  emit(type: string, event: SocketEvent): void {
     for (const l of this.listeners.get(type) ?? []) l(event);
   }
 }
@@ -75,7 +76,6 @@ function defaultRespond(
   msg: { id: number; method: string; params: Record<string, unknown> },
   origin: string,
 ): unknown {
-  if (msg.method === "Runtime.enable") return { id: msg.id, result: {} };
   if (msg.method === "Runtime.evaluate") {
     const guardedFor = /location\.origin !== "([^"]+)"/.exec(String(msg.params.expression))?.[1];
     if (guardedFor && guardedFor !== origin) {
@@ -124,8 +124,8 @@ async function expectCode(promise: Promise<unknown>, code: string): Promise<CdpT
 
 // --- Allowlist invariants (the read-only guarantee) ---
 
-test("allowlist contains only Runtime evaluation methods", () => {
-  assert.deepEqual([...ALLOWED_CDP_METHODS].sort(), ["Runtime.disable", "Runtime.enable", "Runtime.evaluate"]);
+test("allowlist contains exactly one method: Runtime.evaluate", () => {
+  assert.deepEqual([...ALLOWED_CDP_METHODS], ["Runtime.evaluate"]);
 });
 
 test("allowlist contains no forbidden (input, navigation, storage, target) methods", () => {
@@ -199,7 +199,12 @@ test("selectTarget refuses a lookalike origin", () => {
   assert.throws(() => selectTarget([lookalike], ORIGIN), (e: unknown) => (e as CdpTransportError).code === "TRANSPORT_CDP_ORIGIN_REFUSED");
 });
 
-test("selectTarget errors when the matching tab has no debugger URL", () => {
+test("selectTarget skips a busy tab when another tab on the origin is attachable", () => {
+  const busy: CdpTarget = { ...discordTab, id: "busy", webSocketDebuggerUrl: undefined };
+  assert.equal(selectTarget([busy, discordTab], ORIGIN).id, "T1");
+});
+
+test("selectTarget errors only when every matching tab has no debugger URL", () => {
   const busy: CdpTarget = { ...discordTab, webSocketDebuggerUrl: undefined };
   assert.throws(() => selectTarget([busy], ORIGIN), (e: unknown) => (e as CdpTransportError).code === "TRANSPORT_CDP_NO_TARGET" && /DevTools/.test((e as CdpTransportError).message));
 });
@@ -242,14 +247,14 @@ test("constructor rejects a non-origin allowedOrigin", () => {
 
 // --- Connect / evaluate lifecycle ---
 
-test("connect discovers, attaches, enables Runtime, and is idempotent", async () => {
+test("connect discovers and attaches without sending anything, and is idempotent", async () => {
   const { transport, socket } = make();
   const target = await transport.connect();
   assert.equal(target.id, "T1");
   assert.equal(transport.attachedTarget?.id, "T1");
-  assert.deepEqual(socket.sent.map((m) => m.method), ["Runtime.enable"]);
+  assert.deepEqual(socket.sent, [], "attach needs no CDP call; Runtime.enable is deliberately not sent");
   await transport.connect();
-  assert.equal(socket.sent.length, 1, "second connect must not re-attach");
+  assert.deepEqual(socket.sent, []);
 });
 
 test("connect surfaces a socket error as DISCONNECTED", async () => {
@@ -334,17 +339,6 @@ test("concurrent first calls share one connection attempt and one socket", async
   assert.deepEqual(results.slice(0, 2), ["evaluated:a", "evaluated:b"]);
 });
 
-test("a Runtime.enable failure tears the session down", async () => {
-  const socket = new FakeSocket("");
-  socket.respond = (msg) => (msg.method === "Runtime.enable"
-    ? { id: msg.id, error: { code: -32000, message: "nope" } }
-    : defaultRespond(msg, ORIGIN));
-  const { transport } = make({ socket });
-  await expectCode(transport.connect(), "TRANSPORT_CDP_PROTOCOL_ERROR");
-  assert.equal(socket.closed, true);
-  assert.equal(transport.attachedTarget, null);
-});
-
 test("evaluate surfaces page exceptions as EVALUATE_ERROR", async () => {
   const { transport, socket } = make();
   socket.respond = (msg) => {
@@ -426,7 +420,7 @@ test("browser-side close rejects pending calls", async () => {
   };
   const pending = transport.evaluate("hang");
   await new Promise((r) => setTimeout(r, 5));
-  socket.emit("close", undefined);
+  socket.emit("close", {});
   const err = await expectCode(pending, "TRANSPORT_CDP_DISCONNECTED");
   assert.match(err.message, /tab closed or Chrome quit/);
 });
@@ -451,4 +445,92 @@ test("unsolicited events and non-JSON frames are ignored", async () => {
   socket.emit("message", { data: "not json" });
   socket.emit("message", { data: JSON.stringify({ id: 999, result: {} }) });
   assert.equal(await transport.evaluate("ok"), "evaluated:ok");
+});
+
+test("a stale close from an earlier socket cannot tear down a newer session", async () => {
+  const sockets: FakeSocket[] = [];
+  const transport = new BrowserCdpTransport(
+    { allowedOrigin: ORIGIN, timeoutMs: 200 },
+    { fetchImpl: fakeFetch([discordTab]), socketFactory: () => { const s = new FakeSocket(""); sockets.push(s); return s; } },
+  );
+  await transport.connect();
+  transport.close();
+  await transport.connect();
+  assert.equal(sockets.length, 2);
+  sockets[0].emit("close", {}); // the old socket's delayed close event
+  assert.equal(transport.attachedTarget?.id, "T1", "newer session must survive");
+  assert.equal(await transport.evaluate("still"), "evaluated:still");
+});
+
+test("close during an in-flight connect abandons the attempt and closes its socket", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const slowFetch: FetchLike = async () => { await gate; return { ok: true, status: 200, json: async () => [discordTab] }; };
+  const socket = new FakeSocket("");
+  const transport = new BrowserCdpTransport(
+    { allowedOrigin: ORIGIN, timeoutMs: 500 },
+    { fetchImpl: slowFetch, socketFactory: () => socket },
+  );
+  const attempt = transport.connect();
+  transport.close();
+  release();
+  await expectCode(attempt, "TRANSPORT_CDP_DISCONNECTED");
+  assert.equal(transport.attachedTarget, null);
+});
+
+test("unserializable or non-data page values are EVALUATE_ERROR, not undefined", async () => {
+  const { transport, socket } = make();
+  socket.respond = (msg) => {
+    const inner = innerExpression(msg.params);
+    if (inner === "0/0") return { id: msg.id, result: { result: { type: "number", unserializableValue: "NaN" } } };
+    if (inner === "document.body") return { id: msg.id, result: { result: { type: "object", subtype: "node", description: "body" } } };
+    if (inner === "undefined") return { id: msg.id, result: { result: { type: "undefined" } } };
+    return defaultRespond(msg, ORIGIN);
+  };
+  const nan = await expectCode(transport.evaluate("0/0"), "TRANSPORT_CDP_EVALUATE_ERROR");
+  assert.match(nan.message, /NaN/);
+  const node = await expectCode(transport.evaluate("document.body"), "TRANSPORT_CDP_EVALUATE_ERROR");
+  assert.match(node.message, /node/);
+  assert.equal(await transport.evaluate("undefined"), undefined);
+});
+
+test("an empty evaluate response is a PROTOCOL_ERROR, not a TypeError", async () => {
+  const { transport, socket } = make();
+  socket.respond = (msg) => (msg.method === "Runtime.evaluate" ? { id: msg.id } : defaultRespond(msg, ORIGIN));
+  await expectCode(transport.evaluate("x"), "TRANSPORT_CDP_PROTOCOL_ERROR");
+});
+
+test("oversize frames are rejected before parsing", async () => {
+  const socket = new FakeSocket("");
+  socket.respond = (msg) => {
+    if (innerExpression(msg.params) === "huge") {
+      return { id: msg.id, result: { result: { type: "string", value: "x".repeat(20_000) } } };
+    }
+    return defaultRespond(msg, ORIGIN);
+  };
+  const transport = new BrowserCdpTransport(
+    { allowedOrigin: ORIGIN, timeoutMs: 200, maxResultBytes: 1000 },
+    { fetchImpl: fakeFetch([discordTab]), socketFactory: () => socket },
+  );
+  const err = await expectCode(transport.evaluate("huge"), "TRANSPORT_CDP_RESULT_TOO_LARGE");
+  assert.match(err.message, /frame/);
+});
+
+test("socket errors shaped like a WHATWG ErrorEvent produce a readable message", async () => {
+  const socket = new FakeSocket("");
+  socket.autoOpen = false;
+  socket.autoError = new TypeError("");
+  const { transport } = make({ socket });
+  const err = await expectCode(transport.connect(), "TRANSPORT_CDP_DISCONNECTED");
+  assert.doesNotMatch(err.message, /\[object/);
+  assert.match(err.message, /refused|rejected|TypeError/);
+});
+
+test("a socket factory that throws is a PROTOCOL_ERROR", async () => {
+  const transport = new BrowserCdpTransport(
+    { allowedOrigin: ORIGIN, timeoutMs: 200 },
+    { fetchImpl: fakeFetch([discordTab]), socketFactory: () => { throw new SyntaxError("bad url"); } },
+  );
+  const err = await expectCode(transport.connect(), "TRANSPORT_CDP_PROTOCOL_ERROR");
+  assert.match(err.message, /bad url/);
 });

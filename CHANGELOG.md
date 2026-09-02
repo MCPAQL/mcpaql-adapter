@@ -11,12 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Browser-session transport plugin (`src/plugins/transport/browser-cdp.ts`) — first piece of the read-only Discord adapter (#38, closes #39)
   - Attaches to the user's already-running Chrome over the DevTools Protocol using Node's built-in WebSocket and `fetch`; zero runtime dependencies
-  - Read-only by construction: a three-method allowlist (`Runtime.enable`, `Runtime.disable`, `Runtime.evaluate`) checked on every send, with a forbidden-prefix list (`Input.`, `Page.navigate`, storage, target, browser domains) asserted by test
+  - Read-only by construction: a one-method allowlist (`Runtime.evaluate`) checked on every send, with a forbidden-prefix list (`Input.`, `Page.navigate`, storage, target, browser domains) asserted by test. `Runtime.enable` is deliberately not sent; evaluation does not need it and it would subscribe the socket to the page's event stream
+  - Expressions are adapter-authored static scripts, never caller-supplied; this layer bounds the transport, and the read-only script scan (#44) bounds the scripts
   - Origin pinning: only a page target on the configured origin is selected, and every evaluate is wrapped so the origin check and the expression run in the same execution context; a tab that navigates away never runs the expression and the session closes
   - Named, never-empty failures: port closed (with the exact Chrome launch flag), no target, origin refused, method denied, timeout, page exception, result too large, disconnected, protocol error
   - Result size cap and per-call timeouts
   - Concurrent first calls share one connection attempt; a failed or dangling handshake closes the socket it opened; discovery body reads are under the timeout with unreadable JSON mapped to a protocol error
-  - 38 unit tests against fake socket and fetch doubles
+  - Listeners are bound to their socket so a stale close from an earlier socket cannot tear down a newer session; close during an in-flight connect abandons it; unserializable page values (NaN, DOM nodes) and empty responses are named errors; oversize frames are rejected before parsing; WebSocket error events produce readable text; target selection skips a tab with DevTools open when another tab on the origin is attachable
+  - 45 unit tests against fake socket and fetch doubles
 
 - `@mcpaql/security` package (`src/security/`) — standalone security infrastructure ported from DollhouseMCP
   - `tool-classification.ts` — CLI tool risk assessment with 50+ dangerous patterns, risk scoring 0-100

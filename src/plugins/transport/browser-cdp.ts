@@ -42,12 +42,12 @@ export const DEFAULT_MAX_RESULT_BYTES = 10 * 1024 * 1024;
 
 /**
  * The complete set of CDP methods this transport is permitted to send.
- * Anything else is refused before it reaches the socket. Kept deliberately
- * tiny: reading a page needs nothing but evaluation.
+ * Anything else is refused before it reaches the socket. Reading a page
+ * needs exactly one method. `Runtime.enable` is deliberately absent: it is
+ * not required for evaluation and would subscribe the socket to the page's
+ * console and exception event stream.
  */
 export const ALLOWED_CDP_METHODS: ReadonlySet<string> = new Set([
-  "Runtime.enable",
-  "Runtime.disable",
   "Runtime.evaluate",
 ]);
 
@@ -123,10 +123,14 @@ export interface CdpTarget {
 export interface WebSocketLike {
   send(data: string): void;
   close(): void;
-  addEventListener(type: "open", listener: () => void): void;
-  addEventListener(type: "close", listener: () => void): void;
-  addEventListener(type: "error", listener: (event: unknown) => void): void;
-  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  addEventListener(type: "open" | "close" | "error" | "message", listener: (event: SocketEvent) => void): void;
+}
+
+/** The parts of a WHATWG socket event this transport reads. */
+export interface SocketEvent {
+  data?: unknown;
+  error?: unknown;
+  message?: string;
 }
 
 export type SocketFactory = (url: string) => WebSocketLike;
@@ -171,16 +175,15 @@ export function originOf(url: string): string | null {
  */
 export function selectTarget(targets: CdpTarget[], allowedOrigin: string): CdpTarget {
   const pages = targets.filter((t) => t.type === "page" && typeof t.url === "string");
-  const match = pages.find((t) => originOf(t.url) === allowedOrigin);
-  if (match) {
-    if (!match.webSocketDebuggerUrl) {
-      throw new CdpTransportError(
-        "TRANSPORT_CDP_NO_TARGET",
-        `Tab at ${allowedOrigin} has no debugger endpoint; another DevTools client may be attached. Close DevTools on that tab and retry.`,
-        { targetId: match.id },
-      );
-    }
-    return match;
+  const matches = pages.filter((t) => originOf(t.url) === allowedOrigin);
+  const attachable = matches.find((t) => typeof t.webSocketDebuggerUrl === "string" && t.webSocketDebuggerUrl !== "");
+  if (attachable) return attachable;
+  if (matches.length > 0) {
+    throw new CdpTransportError(
+      "TRANSPORT_CDP_NO_TARGET",
+      `Every tab at ${allowedOrigin} has no debugger endpoint; another DevTools client is attached. Close DevTools on those tabs and retry.`,
+      { targetIds: matches.map((t) => t.id) },
+    );
   }
   const seen = pages.map((t) => originOf(t.url)).filter((o): o is string => o !== null);
   const unique = [...new Set(seen)];
@@ -249,8 +252,20 @@ function isTarget(value: unknown): value is CdpTarget {
 }
 
 function describe(err: unknown): string {
-  if (err instanceof Error) return err.message || err.name;
-  return String(err);
+  if (err instanceof Error) {
+    const cause = (err as { cause?: unknown }).cause;
+    const causeText = cause instanceof Error && cause.message ? ` (${cause.message})` : "";
+    return (err.message || err.name) + causeText;
+  }
+  if (typeof err === "object" && err !== null) {
+    const ev = err as SocketEvent;
+    if (ev.error !== undefined) return describe(ev.error);
+    if (typeof ev.message === "string" && ev.message !== "") return ev.message;
+  }
+  const text = String(err);
+  return text === "[object Object]" || text === "[object ErrorEvent]" || text === "[object Event]"
+    ? "connection refused or upgrade rejected (is Chrome running with --remote-debugging-port, and is this the same user?)"
+    : text;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
@@ -267,6 +282,17 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): P
       (e) => { clearTimeout(timer); reject(e); },
     );
   });
+}
+
+/** Allowance for the CDP envelope around a result when sizing frames. */
+const FRAME_OVERHEAD_BYTES = 4096;
+
+function closeQuietly(socket: WebSocketLike): void {
+  try {
+    socket.close();
+  } catch {
+    // Closing an already-closed socket is not an error we care about.
+  }
 }
 
 /** Marker key the guarded expression returns when the tab is on another origin. */
@@ -312,6 +338,8 @@ export class BrowserCdpTransport {
   private readonly pending = new Map<number, Pending>();
   private closed = false;
   private connecting: Promise<CdpTarget> | null = null;
+  /** Bumped by every close(); an attach that outlives its generation is abandoned. */
+  private generation = 0;
 
   constructor(config: BrowserCdpConfig, deps: BrowserCdpDeps = {}) {
     if (typeof config.allowedOrigin !== "string" || originOf(config.allowedOrigin) !== config.allowedOrigin) {
@@ -351,15 +379,26 @@ export class BrowserCdpTransport {
 
   private async attach(): Promise<CdpTarget> {
     this.closed = false;
+    const gen = this.generation;
+    const abandoned = (): boolean => gen !== this.generation;
     const targets = await discoverTargets(
       this.config.host,
       this.config.port,
       this.fetchImpl,
       this.config.timeoutMs,
     );
+    if (abandoned()) throw new CdpTransportError("TRANSPORT_CDP_DISCONNECTED", "Transport closed during connect.");
     const target = selectTarget(targets, this.config.allowedOrigin);
     const wsUrl = target.webSocketDebuggerUrl as string;
-    const socket = this.socketFactory(wsUrl);
+    let socket: WebSocketLike;
+    try {
+      socket = this.socketFactory(wsUrl);
+    } catch (err) {
+      throw new CdpTransportError(
+        "TRANSPORT_CDP_PROTOCOL_ERROR",
+        `Cannot open WebSocket ${wsUrl}: ${describe(err)}`,
+      );
+    }
     try {
       await withTimeout(
         new Promise<void>((resolve, reject) => {
@@ -374,25 +413,21 @@ export class BrowserCdpTransport {
         this.config.timeoutMs,
         "attach",
       );
+      if (abandoned()) throw new CdpTransportError("TRANSPORT_CDP_DISCONNECTED", "Transport closed during connect.");
     } catch (err) {
-      // A handshake that failed or is still dangling must not leak a live connection.
-      try {
-        socket.close();
-      } catch {
-        // Nothing further to do for a socket that refuses to close.
-      }
+      // A handshake that failed, dangled, or was abandoned must not leak a live connection.
+      closeQuietly(socket);
       throw err;
     }
-    socket.addEventListener("message", (event) => this.onMessage(event.data));
-    socket.addEventListener("close", () => this.onClose());
+    // Listeners are bound to this socket: a stale event from an earlier socket can never touch a newer session.
+    socket.addEventListener("message", (event) => {
+      if (this.socket === socket) this.onMessage(event.data);
+    });
+    socket.addEventListener("close", () => {
+      if (this.socket === socket) this.onClose();
+    });
     this.socket = socket;
     this.target = target;
-    try {
-      await this.send("Runtime.enable", {});
-    } catch (err) {
-      this.close();
-      throw err;
-    }
     return target;
   }
 
@@ -424,8 +459,11 @@ export class BrowserCdpTransport {
       },
       timeoutMs,
     );
+    if (typeof raw !== "object" || raw === null) {
+      throw new CdpTransportError("TRANSPORT_CDP_PROTOCOL_ERROR", "DevTools returned an empty evaluate response.");
+    }
     const result = raw as {
-      result?: { type?: string; value?: unknown; description?: string };
+      result?: { type?: string; subtype?: string; value?: unknown; unserializableValue?: string; description?: string };
       exceptionDetails?: { text?: string; exception?: { description?: string } };
     };
     if (result.exceptionDetails) {
@@ -437,7 +475,20 @@ export class BrowserCdpTransport {
         `Page script threw: ${desc.slice(0, 500)}`,
       );
     }
-    const value = result.result?.value;
+    const remote = result.result ?? {};
+    if (remote.unserializableValue !== undefined) {
+      throw new CdpTransportError(
+        "TRANSPORT_CDP_EVALUATE_ERROR",
+        `Page script returned a non-JSON value (${remote.unserializableValue}). Return plain data.`,
+      );
+    }
+    if (remote.value === undefined && remote.type !== undefined && remote.type !== "undefined") {
+      throw new CdpTransportError(
+        "TRANSPORT_CDP_EVALUATE_ERROR",
+        `Page script returned a ${remote.subtype ?? remote.type} that cannot be serialized. Return plain data.`,
+      );
+    }
+    const value = remote.value;
     const mismatch = originMismatchOf(value);
     if (mismatch !== null) {
       this.close();
@@ -460,17 +511,14 @@ export class BrowserCdpTransport {
 
   /** Close the socket. Pending calls reject with DISCONNECTED. */
   close(): void {
+    this.generation++;
     if (this.closed) return;
     this.closed = true;
     const socket = this.socket;
     this.socket = null;
     this.target = null;
     this.rejectAllPending("Transport closed.");
-    try {
-      socket?.close();
-    } catch {
-      // Closing an already-closed socket is not an error we care about.
-    }
+    if (socket) closeQuietly(socket);
   }
 
   /**
@@ -500,9 +548,24 @@ export class BrowserCdpTransport {
   }
 
   private onMessage(data: unknown): void {
+    const text = typeof data === "string" ? data : String(data);
+    // Reject oversize frames before parsing so a huge result never costs three copies in memory.
+    if (text.length > this.config.maxResultBytes + FRAME_OVERHEAD_BYTES) {
+      const idMatch = /"id":\s*(\d+)/.exec(text.slice(0, 256));
+      const entry = idMatch ? this.pending.get(Number(idMatch[1])) : undefined;
+      if (entry) {
+        this.pending.delete(Number(idMatch![1]));
+        entry.reject(new CdpTransportError(
+          "TRANSPORT_CDP_RESULT_TOO_LARGE",
+          `Result frame is ${text.length} characters; limit is ${this.config.maxResultBytes} bytes. Narrow the query or lower the limit.`,
+          { size: text.length, maxResultBytes: this.config.maxResultBytes },
+        ));
+      }
+      return;
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(typeof data === "string" ? data : String(data));
+      parsed = JSON.parse(text);
     } catch {
       return; // Non-JSON frames are ignored; the pending call will time out with context.
     }
