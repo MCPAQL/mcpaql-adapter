@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Discord `read_messages` right after a navigation: the route changes and the message list mounts before the rows render (observed live through the runnable adapter), so the first extraction reported the channel "not in view" and the read stopped with a problem. The read now polls for up to 3 s after a navigation before reporting that problem; a channel that was already open gets no grace and behaves as before (#38)
+
 ### Added
 
 - Discord adapter configuration (`src/plugins/transport/discord-config.ts`) — part of #52 for the read-only Discord adapter (#38)
