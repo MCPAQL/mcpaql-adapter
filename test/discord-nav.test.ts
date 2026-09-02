@@ -219,10 +219,28 @@ test("navigateExpression refuses anything that did not come from channelPath", (
   assert.match(navigateExpression(`/channels/@me/${DM1}`), /location\.assign\("\/channels\/@me\/\d+"\)/);
 });
 
-test("mountedExpression checks the list for the specific channel", () => {
+test("mountedExpression is true for a row of the channel or an empty list at the channel's location", () => {
   const expr = mountedExpression(C1);
   assert.match(expr, new RegExp(`chat-messages-${C1}-`));
   assert.throws(() => mountedExpression("nope"), /snowflake/);
+  const run = (rows: string[], pathname: string): boolean => {
+    const list = el("ol", { "data-list-id": "chat-messages" }, ...rows.map((id) => el("li", { id: `chat-messages-${C1}-${id}` })));
+    const root = el("html", {}, list);
+    return vm.runInNewContext(expr, { document: { querySelector: (q: string) => root.querySelector(q) }, location: { pathname } }) as boolean;
+  };
+  assert.equal(run([DM1], "/channels/@me/other"), true, "a row of the channel is enough");
+  assert.equal(run([], `/channels/${G}/${C1}`), true, "an empty channel at its own location is mounted");
+  assert.equal(run([], `/channels/${G}/${C1}/${DM1}`), true, "with an anchor message too");
+  assert.equal(run([], `/channels/${G}/${C2}`), false, "another channel's empty list is not");
+  assert.equal(run([], `/channels/${G}/${C1}0`), false, "prefix of another id is not");
+});
+
+test("openChannel bounds every evaluate by the remaining budget", async () => {
+  const budgets: number[] = [];
+  const evaluate = async (_e: string, o?: { timeoutMs?: number }): Promise<unknown> => { budgets.push(o?.timeoutMs ?? -1); return false; };
+  await assert.rejects(openChannel(evaluate, { channelId: DM1 }, { sleep: noSleep, timeoutMs: 50, pollMs: 0 }), /did not open/);
+  assert.ok(budgets.length >= 2);
+  assert.ok(budgets.every((b) => b >= 200 && b <= 50 + 200), `budgets ${budgets.join(",")}`);
 });
 
 function fakeEvaluate(script: (calls: string[]) => (expr: string) => unknown) {
