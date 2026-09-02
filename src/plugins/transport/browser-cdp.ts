@@ -147,13 +147,23 @@ export interface EvaluateOptions {
 }
 
 /**
- * The exact Chrome launch flag a user needs when the port is closed.
- * Printed in the PORT_CLOSED error so setup is one copy-paste.
+ * Where the hint tells the user to keep the debug-enabled profile. Chrome
+ * 136 and later refuse `--remote-debugging-port` on the default profile, so
+ * the profile must be a separate directory; it has its own logins.
  */
-export function launchHint(port: number = DEFAULT_CDP_PORT): string {
-  return `Start Chrome with remote debugging enabled, e.g. ` +
-    `macOS: open -a "Google Chrome" --args --remote-debugging-port=${port} ; ` +
-    `Linux: google-chrome --remote-debugging-port=${port}`;
+export const DEFAULT_CHROME_PROFILE_DIR = "$HOME/.mcpaql/chrome-debug";
+
+/**
+ * The exact Chrome launch commands a user needs when the port is closed,
+ * for macOS and Linux. Printed in the PORT_CLOSED error so setup is one
+ * copy-paste. Both flags are required: Chrome 136+ opens the port only
+ * when `--user-data-dir` names a non-default directory.
+ */
+export function launchHint(port: number = DEFAULT_CDP_PORT, profileDir: string = DEFAULT_CHROME_PROFILE_DIR): string {
+  const flags = `--remote-debugging-port=${port} --user-data-dir="${profileDir}"`;
+  return `Start Chrome with remote debugging enabled and a separate profile (Chrome 136+ requires both flags; sign in there once). ` +
+    `macOS: open -a "Google Chrome" --args ${flags} ; ` +
+    `Linux: google-chrome ${flags}`;
 }
 
 /**

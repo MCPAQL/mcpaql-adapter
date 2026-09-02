@@ -163,9 +163,14 @@ test("evaluate never requests a user gesture", async () => {
 
 // --- Helpers ---
 
-test("launchHint names the port and the flag", () => {
+test("launchHint names the port, the profile directory, and both platforms", () => {
   const hint = launchHint(9333);
   assert.match(hint, /--remote-debugging-port=9333/);
+  assert.match(hint, /--user-data-dir="\$HOME\/\.mcpaql\/chrome-debug"/);
+  assert.match(hint, /macOS: open -a "Google Chrome" --args/);
+  assert.match(hint, /Linux: google-chrome/);
+  assert.match(hint, /136/);
+  assert.match(launchHint(9333, "/tmp/p"), /--user-data-dir="\/tmp\/p"/);
   assert.match(hint, /macOS/);
 });
 
