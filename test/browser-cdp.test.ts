@@ -172,6 +172,16 @@ test("launchHint names the port, the profile directory, and both platforms", () 
   assert.match(hint, /136/);
 });
 
+test("discovery has one deadline: a slow response plus a stalled body cannot take two timeouts", async () => {
+  const slowThenStalled: FetchLike = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ ok: true, status: 200, json: () => new Promise(() => {}) }), 120);
+  });
+  const started = Date.now();
+  await assert.rejects(discoverTargets("127.0.0.1", 9222, slowThenStalled, 200), (err: unknown) => err instanceof CdpTransportError && err.code === "TRANSPORT_CDP_TIMEOUT");
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 320, `took ${elapsed}ms; the body read must get only what is left of the 200ms`);
+});
+
 test("the transport refuses a non-loopback host before touching the network", () => {
   for (const host of ["0.0.0.0", "10.0.0.5", "chrome.example.com"]) {
     assert.throws(() => new BrowserCdpTransport({ allowedOrigin: ORIGIN, host }), (err: unknown) => err instanceof CdpTransportError && err.code === "TRANSPORT_CDP_ORIGIN_REFUSED" && /loopback/.test(err.message));
