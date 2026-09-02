@@ -84,17 +84,24 @@ test("a declared effect is actually used, so declarations cannot rot into blanke
   }
 });
 
-test("dispatchEvent appears only under a declared effect and only with that effect's event type", () => {
+test("dispatchEvent appears only under a declared effect, only inline, and only with that effect's event type", () => {
   const allowed: Record<DeclaredEffect, string> = { "scroll-message-list": "scroll", "navigate-same-origin": "popstate" };
   for (const script of PAGE_SCRIPTS) {
     for (const [kind, text] of textsOf(script)) {
-      const dispatches = [...text.matchAll(/dispatchEvent\(new (\w+)\("([^"]+)"/g)].map((m) => m[2]);
+      const dispatchCount = (text.match(/dispatchEvent\(/g) ?? []).length;
       if (script.effects.length === 0) {
-        assert.ok(!text.includes("dispatchEvent"), `${script.name} ${kind} dispatches events without a declared effect`);
+        assert.equal(dispatchCount, 0, `${script.name} ${kind} dispatches events without a declared effect`);
+        assert.ok(!/new \w+\("(scroll|popstate|click|keydown|keyup|keypress|input|submit|focus|blur|change|paste)"/.test(text), `${script.name} ${kind} constructs an event without a declared effect`);
         continue;
       }
       const permitted = new Set(script.effects.map((e) => allowed[e]));
-      assert.ok(dispatches.every((t) => permitted.has(t)), `${script.name} ${kind} dispatches ${dispatches.join(",")}; permitted ${[...permitted].join(",")}`);
+      // Only the inline literal form is accepted, so the type is always visible to this test.
+      const inline = [...text.matchAll(/dispatchEvent\(new (\w+)\("([^"]+)"/g)];
+      assert.equal(inline.length, dispatchCount, `${script.name} ${kind}: every dispatchEvent must be dispatchEvent(new XEvent("type", ...))`);
+      for (const m of inline) assert.ok(permitted.has(m[2]), `${script.name} ${kind} dispatches ${m[2]}; permitted ${[...permitted].join(",")}`);
+      // Every constructed event, dispatched or not, must be a permitted type too.
+      // Any constructor called with a bare event-type literal, dispatched or not, must be a permitted type.
+      for (const m of text.matchAll(/new \w+\("([a-z]+)"(?:,|\))/g)) assert.ok(permitted.has(m[1]), `${script.name} ${kind} constructs a ${m[1]} event`);
     }
   }
 });
@@ -106,7 +113,7 @@ test("the navigate effect pushes only /channels/ paths and never reloads", () =>
       const targets = [...text.matchAll(/history\.pushState\(\{\}, "", "([^"]*)"\)/g)].map((m) => m[1]);
       assert.ok(targets.length > 0, `${script.name} declares navigation but pushes nothing`);
       assert.ok(targets.every((t) => /^\/channels\//.test(t)), `${script.name} navigates to ${targets.join(",")}`);
-      assert.ok(!/location\.(assign|href|replace)/.test(text), `${script.name} would reload the client`);
+      assert.ok(!/location\.(assign|href|replace|reload)|window\.open\(|document\.write\(/.test(text), `${script.name} would reload the client`);
     }
   }
 });

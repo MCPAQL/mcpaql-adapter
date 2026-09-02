@@ -22,6 +22,7 @@ import {
 } from "./discord-history.js";
 import {
   buildListExpression,
+  channelPath,
   listChannels,
   listDms,
   listGuilds,
@@ -58,7 +59,9 @@ export const PAGE_SCRIPTS: readonly PageScript[] = [
   { name: "listGuilds", fn: listGuilds, sample: () => buildListExpression("listGuilds"), effects: [] },
   { name: "listChannels", fn: listChannels, sample: () => buildListExpression("listChannels"), effects: [] },
   { name: "mountedExpression", fn: null, sample: () => mountedExpression(SNOWFLAKE), effects: [] },
-  { name: "navigateExpression", fn: null, sample: () => navigateExpression(`/channels/@me/${SNOWFLAKE}`), effects: ["navigate-same-origin"] },
+  { name: "mountedExpression (anchored)", fn: null, sample: () => mountedExpression(SNOWFLAKE, "1544685390995132426"), effects: [] },
+  { name: "navigateExpression", fn: null, sample: () => navigateExpression(channelPath({ channelId: SNOWFLAKE })), effects: ["navigate-same-origin"] },
+  { name: "navigateExpression (guild, anchored)", fn: null, sample: () => navigateExpression(channelPath({ guildId: "1210290974601773056", channelId: SNOWFLAKE, messageId: "1544685390995132426" })), effects: ["navigate-same-origin"] },
   { name: "pinnedList", fn: pinnedList, sample: () => buildMountedCountExpression(SNOWFLAKE), effects: [] },
   { name: "scrollNudge", fn: scrollNudge, sample: () => buildScrollNudgeExpression(SNOWFLAKE), effects: ["scroll-message-list"] },
   { name: "mountedCount", fn: mountedCount, sample: () => buildMountedCountExpression(SNOWFLAKE), effects: [] },
@@ -76,6 +79,8 @@ export const FORBIDDEN_PRIMITIVES: readonly string[] = [
   "fetch(", "XMLHttpRequest", "WebSocket(", "sendBeacon", "EventSource",
   // Storage and identity
   "localStorage", "sessionStorage", "indexedDB", "document.cookie", "caches.",
+  // Reloads and other navigation paths (route changes go through the gated history push only)
+  "location.reload", "location.assign", "location.href", "location.replace", "location.pathname =", "location.search =", "location.hash =", "window.open(", "document.write(",
   // Script and frame injection
   "eval(", "new Function", "createElement(\"script\"", "createElement('script'", "<iframe", "importScripts",
   // Discord's own client internals and credential access. Matched as code
@@ -90,6 +95,6 @@ export const FORBIDDEN_PRIMITIVES: readonly string[] = [
  * must be the one that effect exists for (`scroll` or `popstate`).
  */
 export const GATED_PRIMITIVES: Readonly<Record<DeclaredEffect, readonly string[]>> = {
-  "navigate-same-origin": ["location.assign", "location.href", "location.replace", "history.pushState", "history.replaceState", "PopStateEvent"],
+  "navigate-same-origin": ["history.pushState", "history.replaceState", "PopStateEvent"],
   "scroll-message-list": ["scrollTop", "scrollTo(", "scrollBy(", "scrollIntoView"],
 };

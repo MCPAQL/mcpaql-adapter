@@ -37,7 +37,7 @@ import {
   type ExtractResult,
 } from "./discord-dom.js";
 import { OpenChannelTimeout, isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
-import { classifyDiscordMessages, type UntrustedFlag } from "./discord-untrusted.js";
+import { classifyChannelLabel, classifyDiscordMessages, type UntrustedFlag } from "./discord-untrusted.js";
 import type { SecuritySeverity } from "../../security/types.js";
 
 /** Selectors observed on discord.com, verified 2026-09-02. */
@@ -418,8 +418,17 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     }
   }
 
+  // Classification runs after the loop and inside `elapsed_ms`; its cost is
+  // bounded per field by the classifier's default (Discord's message ceiling)
+  // and per read by `limit`.
   const classified = classifyDiscordMessages(wanted().slice(0, p.limit), { redact: p.redact });
   const messages = classified.messages;
+  const labelCheck = classifyChannelLabel(label, { redact: p.redact });
+  label = labelCheck.label;
+  const flags = labelCheck.flag ? [labelCheck.flag, ...classified.flags] : classified.flags;
+  const highest = [labelCheck.flag?.severity ?? null, classified.highest_severity]
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+    .sort((a, b) => ({ low: 1, medium: 2, high: 3, critical: 4 }[b] - { low: 1, medium: 2, high: 3, critical: 4 }[a]))[0] ?? null;
   const complete = stop === "filled" || stop === "beginning";
   // Every incomplete stop is resumable: when nothing older than `before` was
   // collected yet, the cursor is `before` itself so a caller continues from
@@ -436,8 +445,8 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     stop_reason: stop ?? "problem",
     problem,
     elapsed_ms: now() - started,
-    flags: classified.flags,
+    flags,
     flagged_ids: classified.flagged_ids,
-    highest_severity: classified.highest_severity,
+    highest_severity: highest,
   };
 }
