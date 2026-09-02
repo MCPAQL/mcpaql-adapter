@@ -12,7 +12,7 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-import { buildExtractMessagesExpression, extractMessages } from "./discord-dom.js";
+import { buildExtractMessagesExpression, extractMessages, renderText } from "./discord-dom.js";
 import {
   buildMountedCountExpression,
   buildScrollNudgeExpression,
@@ -26,7 +26,6 @@ import {
   listGuilds,
   mountedExpression,
   navigateExpression,
-  plainText,
 } from "./discord-nav.js";
 
 /**
@@ -35,7 +34,7 @@ import {
  * script declares it.
  */
 export type DeclaredEffect =
-  /** Assign `location` to a same-origin path built from validated ids. */
+  /** Push a same-origin path built from validated ids onto history and dispatch `popstate` (a route change, not a reload). */
   | "navigate-same-origin"
   /** Set `scrollTop` on the message scroller and dispatch a synthetic `scroll` event on it. */
   | "scroll-message-list";
@@ -53,7 +52,7 @@ const SNOWFLAKE = "1520443442982031486";
 
 export const PAGE_SCRIPTS: readonly PageScript[] = [
   { name: "extractMessages", fn: extractMessages, sample: () => buildExtractMessagesExpression({ channelId: SNOWFLAKE }), effects: [] },
-  { name: "plainText", fn: plainText, sample: () => buildListExpression("listDms"), effects: [] },
+  { name: "renderText", fn: renderText, sample: () => buildExtractMessagesExpression({ channelId: SNOWFLAKE }), effects: [] },
   { name: "listDms", fn: listDms, sample: () => buildListExpression("listDms"), effects: [] },
   { name: "listGuilds", fn: listGuilds, sample: () => buildListExpression("listGuilds"), effects: [] },
   { name: "listChannels", fn: listChannels, sample: () => buildListExpression("listChannels"), effects: [] },
@@ -81,8 +80,12 @@ export const FORBIDDEN_PRIMITIVES: readonly string[] = [
   "webpackChunk", "__DISCORD", "token",
 ];
 
-/** Primitives allowed only under a declared effect. */
+/**
+ * Primitives allowed only under a declared effect. `dispatchEvent` is
+ * checked separately: it is allowed under either effect, and the event type
+ * must be the one that effect exists for (`scroll` or `popstate`).
+ */
 export const GATED_PRIMITIVES: Readonly<Record<DeclaredEffect, readonly string[]>> = {
-  "navigate-same-origin": ["location.assign", "location.href", "location.replace", "history.pushState", "history.replaceState"],
-  "scroll-message-list": ["scrollTop", "scrollTo(", "scrollBy(", "scrollIntoView", "dispatchEvent"],
+  "navigate-same-origin": ["location.assign", "location.href", "location.replace", "history.pushState", "history.replaceState", "PopStateEvent"],
+  "scroll-message-list": ["scrollTop", "scrollTo(", "scrollBy(", "scrollIntoView"],
 };

@@ -84,19 +84,29 @@ test("a declared effect is actually used, so declarations cannot rot into blanke
   }
 });
 
-test("the scroll effect dispatches only scroll events and the navigate effect only same-origin paths", () => {
+test("dispatchEvent appears only under a declared effect and only with that effect's event type", () => {
+  const allowed: Record<DeclaredEffect, string> = { "scroll-message-list": "scroll", "navigate-same-origin": "popstate" };
   for (const script of PAGE_SCRIPTS) {
+    for (const [kind, text] of textsOf(script)) {
+      const dispatches = [...text.matchAll(/dispatchEvent\(new (\w+)\("([^"]+)"/g)].map((m) => m[2]);
+      if (script.effects.length === 0) {
+        assert.ok(!text.includes("dispatchEvent"), `${script.name} ${kind} dispatches events without a declared effect`);
+        continue;
+      }
+      const permitted = new Set(script.effects.map((e) => allowed[e]));
+      assert.ok(dispatches.every((t) => permitted.has(t)), `${script.name} ${kind} dispatches ${dispatches.join(",")}; permitted ${[...permitted].join(",")}`);
+    }
+  }
+});
+
+test("the navigate effect pushes only /channels/ paths and never reloads", () => {
+  for (const script of PAGE_SCRIPTS) {
+    if (!script.effects.includes("navigate-same-origin")) continue;
     for (const [, text] of textsOf(script)) {
-      if (script.effects.includes("scroll-message-list")) {
-        const dispatched = [...text.matchAll(/new EventCtor\("([^"]+)"|new Event\("([^"]+)"/g)].map((m) => m[1] ?? m[2]);
-        assert.ok(dispatched.length > 0);
-        assert.ok(dispatched.every((t) => t === "scroll"), `${script.name} dispatches ${dispatched.join(",")}`);
-      }
-      if (script.effects.includes("navigate-same-origin")) {
-        const targets = [...text.matchAll(/location\.assign\("([^"]*)"\)/g)].map((m) => m[1]);
-        assert.ok(targets.length > 0);
-        assert.ok(targets.every((t) => /^\/channels\//.test(t)), `${script.name} navigates to ${targets.join(",")}`);
-      }
+      const targets = [...text.matchAll(/history\.pushState\(\{\}, "", "([^"]*)"\)/g)].map((m) => m[1]);
+      assert.ok(targets.length > 0, `${script.name} declares navigation but pushes nothing`);
+      assert.ok(targets.every((t) => /^\/channels\//.test(t)), `${script.name} navigates to ${targets.join(",")}`);
+      assert.ok(!/location\.(assign|href|replace)/.test(text), `${script.name} would reload the client`);
     }
   }
 });
