@@ -112,7 +112,26 @@ test("the navigate effect pushes only /channels/ paths and never reloads", () =>
 });
 
 test("the forbidden list itself covers the message composer and the user's session", () => {
-  for (const must of [".focus(", "execCommand", "KeyboardEvent", "fetch(", "document.cookie", "localStorage", "token"]) {
+  for (const must of [".focus(", "execCommand", "KeyboardEvent", "fetch(", "document.cookie", "localStorage", ".token", "getToken"]) {
     assert.ok(FORBIDDEN_PRIMITIVES.includes(must));
+  }
+});
+
+test("the scan matches token access as code, not the word in a comment", () => {
+  const prose = "// the class list has a token with the stem scroller";
+  const access = ["window.localStorage.token", "headers.authorization", 'x["token"]', "getToken()"];
+  assert.ok(!FORBIDDEN_PRIMITIVES.some((p) => prose.includes(p)), "a comment mentioning a token is not credential access");
+  for (const a of access) assert.ok(FORBIDDEN_PRIMITIVES.some((p) => a.includes(p)), `${a} must be caught`);
+});
+
+test("the scan holds against sources that keep their comments (tsc output)", () => {
+  // tsx strips comments from Function.prototype.toString(); tsc does not.
+  // Simulate the tsc case for the one function whose comment says "token".
+  const source = readFileSync(new URL("../src/plugins/transport/discord-history.ts", import.meta.url), "utf8");
+  const start = source.indexOf("export function scrollNudge(");
+  const body = source.slice(start, source.indexOf("\n}\n", start) + 2);
+  assert.ok(body.includes("token"), "the fixture comment is still there");
+  for (const primitive of FORBIDDEN_PRIMITIVES) {
+    assert.ok(!body.includes(primitive), `scrollNudge with comments uses forbidden primitive ${JSON.stringify(primitive)}`);
   }
 });

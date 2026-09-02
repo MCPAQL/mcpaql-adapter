@@ -78,8 +78,10 @@ export const FORBIDDEN_PRIMITIVES: readonly string[] = [
   "localStorage", "sessionStorage", "indexedDB", "document.cookie", "caches.",
   // Script and frame injection
   "eval(", "new Function", "createElement(\"script\"", "createElement('script'", "<iframe", "importScripts",
-  // Discord's own client internals
-  "webpackChunk", "__DISCORD", "token",
+  // Discord's own client internals and credential access. Matched as code
+  // shapes, not the bare word: comments in `tsc` output survive
+  // `Function.prototype.toString()`, and prose may legitimately say "token".
+  "webpackChunk", "__DISCORD", ".token", "\"token\"", "'token'", "token:", "getToken", "authorization",
 ];
 
 /**
