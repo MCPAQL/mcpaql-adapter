@@ -17,6 +17,7 @@ import {
   buildMountedCountExpression,
   buildScrollNudgeExpression,
   mountedCount,
+  pinnedList,
   scrollNudge,
 } from "./discord-history.js";
 import {
@@ -58,8 +59,9 @@ export const PAGE_SCRIPTS: readonly PageScript[] = [
   { name: "listChannels", fn: listChannels, sample: () => buildListExpression("listChannels"), effects: [] },
   { name: "mountedExpression", fn: null, sample: () => mountedExpression(SNOWFLAKE), effects: [] },
   { name: "navigateExpression", fn: null, sample: () => navigateExpression(`/channels/@me/${SNOWFLAKE}`), effects: ["navigate-same-origin"] },
-  { name: "scrollNudge", fn: scrollNudge, sample: () => buildScrollNudgeExpression(), effects: ["scroll-message-list"] },
-  { name: "mountedCount", fn: mountedCount, sample: () => buildMountedCountExpression(), effects: [] },
+  { name: "pinnedList", fn: pinnedList, sample: () => buildMountedCountExpression(SNOWFLAKE), effects: [] },
+  { name: "scrollNudge", fn: scrollNudge, sample: () => buildScrollNudgeExpression(SNOWFLAKE), effects: ["scroll-message-list"] },
+  { name: "mountedCount", fn: mountedCount, sample: () => buildMountedCountExpression(SNOWFLAKE), effects: [] },
 ];
 
 /**

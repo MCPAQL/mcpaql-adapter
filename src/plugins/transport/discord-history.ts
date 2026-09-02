@@ -30,6 +30,7 @@
 import {
   DISCORD_SELECTORS,
   buildExtractMessagesExpression,
+  buildPageExpression,
   type DiscordMessage,
   type DomNode,
   type DomRoot,
@@ -41,8 +42,9 @@ import type { SecuritySeverity } from "../../security/types.js";
 
 /** Selectors observed on discord.com, verified 2026-09-02. */
 export const DISCORD_HISTORY_SELECTORS = {
-  messageList: 'ol[data-list-id="chat-messages"]',
-  messageItem: 'li[id^="chat-messages-"]',
+  messageList: DISCORD_SELECTORS.messageList,
+  messageItem: DISCORD_SELECTORS.messageItem,
+  messageRowPrefix: DISCORD_SELECTORS.messageRowPrefix,
   /** Placeholder rows Discord shows above the oldest mounted message while more history exists. */
   loadingSkeleton: '[class*="blob"]',
   /** Class stem of the scrollable ancestor of the message list. */
@@ -52,49 +54,77 @@ export const DISCORD_HISTORY_SELECTORS = {
 export type DiscordHistorySelectors = typeof DISCORD_HISTORY_SELECTORS;
 
 export interface ScrollStepResult {
-  /** Mounted message rows at the moment of the nudge. */
+  /** Mounted message rows of the pinned channel at the moment of the probe. */
   count: number;
-  /** True when a loading placeholder is shown above the oldest row. */
+  /** Id of the oldest mounted row; changes when older history mounts even if the count does not. */
+  oldestId: string | null;
+  /** True when a loading placeholder is shown above the oldest row (a hint, not proof). */
   moreAbove: boolean;
-  /** True when no scroller was found; the caller should stop. */
+  /** True when no list for the channel or no scroller was found; the caller should stop. */
   problem: string | null;
 }
 
 /**
- * Nudge the message scroller: a real movement, then back to the top. This
- * is what makes Discord fetch older rows. Synchronous on purpose: Chrome
- * throttles timers in hidden tabs (to once per minute after a few minutes),
- * so any in-page waiting can stall for longer than a transport timeout.
- * The wait for growth happens on the Node side with {@link mountedCount}.
- * SELF-CONTAINED: shipped to the browser via `Function.prototype.toString`.
+ * The message list for `channelId`, chosen the same way the extractor does
+ * (the list holding one of the channel's rows), plus its rows.
+ * SELF-CONTAINED helper, inlined by the builders.
  */
-export function scrollNudge(root: DomRoot, sel: DiscordHistorySelectors): ScrollStepResult {
-  const list = root.querySelector(sel.messageList);
-  if (!list) return { count: 0, moreAbove: false, problem: "No message list found." };
-  // The scroller is the innermost scrollable ancestor of the list. DomNode has
-  // no parent pointer, so pick the last element (document order puts
-  // ancestors first) whose class list has a token with the exact stem
-  // `scroller` (Discord hashes classes as `scroller_<hash>`; wrappers like
-  // `scrollerContent_<hash>` share the substring but do not scroll) and
-  // that contains the list.
+export function pinnedList(root: DomRoot, sel: DiscordHistorySelectors, channelId: string): { list: DomNode | null; rows: DomNode[] } {
+  const lists = Array.from(root.querySelectorAll(sel.messageList));
+  const list = lists.find((l) => l.querySelector(`li[id^="${sel.messageRowPrefix}${channelId}-"]`) !== null) ?? (lists.length === 1 ? lists[0] : null);
+  return { list, rows: list ? Array.from(list.querySelectorAll(sel.messageItem)) : [] };
+}
+
+/**
+ * Probe the pinned list: row count, oldest row id, and whether a loading
+ * placeholder sits above the rows. The placeholder is looked for only in the
+ * list's non-row children, so message markup can never masquerade as it.
+ * SELF-CONTAINED apart from {@link pinnedList}.
+ */
+export function mountedCount(root: DomRoot, sel: DiscordHistorySelectors, channelId: string): ScrollStepResult {
+  const { list, rows } = pinnedList(root, sel, channelId);
+  if (!list) return { count: 0, oldestId: null, moreAbove: false, problem: `No message list for channel ${channelId} is mounted.` };
+  const firstId = rows.length > 0 ? (rows[0].getAttribute("id") ?? "") : "";
+  const oldestId = firstId.startsWith(sel.messageRowPrefix) ? firstId.slice(firstId.lastIndexOf("-") + 1) : null;
+  let moreAbove = false;
+  const kids = list.childNodes;
+  for (let i = 0; i < kids.length; i++) {
+    const k = kids[i];
+    if (k.nodeType !== 1 || (k.tagName ?? "").toUpperCase() === "LI") continue;
+    if (k.querySelector(sel.loadingSkeleton) !== null) { moreAbove = true; break; }
+  }
+  return { count: rows.length, oldestId, moreAbove, problem: null };
+}
+
+/**
+ * Nudge the pinned list's scroller: a real movement, then back to the top,
+ * each followed by a synthetic `scroll` event. Synchronous on purpose:
+ * Chrome throttles timers in hidden tabs, so in-page waiting can stall past
+ * a transport timeout; the wait happens in Node with {@link mountedCount}.
+ * Native scroll events are delivered with rendering frames, which a hidden
+ * tab never gets, so without the synthetic event Discord never notices the
+ * movement (verified live 2026-09-02: 51 rows became 81 in a hidden tab
+ * only with the events dispatched).
+ * SELF-CONTAINED apart from {@link pinnedList} and {@link mountedCount}.
+ */
+export function scrollNudge(root: DomRoot, sel: DiscordHistorySelectors, channelId: string): ScrollStepResult {
+  const probe = mountedCount(root, sel, channelId);
+  if (probe.problem !== null) return probe;
+  const { list } = pinnedList(root, sel, channelId);
+  // The scroller is the innermost element whose class list has a token with
+  // the exact stem `scroller` (Discord hashes classes as `scroller_<hash>`;
+  // wrappers like `scrollerContent_<hash>` share the substring but do not
+  // scroll) and that contains the pinned list. Document order puts
+  // ancestors first, so the last match is the innermost.
   type Scroller = DomNode & { scrollTop?: number; scrollHeight?: number; dispatchEvent?: (event: unknown) => boolean };
-  const candidates = Array.from(root.querySelectorAll(`[class*="${sel.scrollerClass}"]`)) as Scroller[];
   let scroller: Scroller | null = null;
-  for (const c of candidates) {
+  for (const c of Array.from(root.querySelectorAll(`[class*="${sel.scrollerClass}"]`)) as Scroller[]) {
     const stems = (c.getAttribute("class") ?? "").split(/\s+/).map((t) => t.split("_")[0]);
-    if (stems.includes(sel.scrollerClass) && c.querySelector(sel.messageList) !== null) scroller = c;
+    if (stems.includes(sel.scrollerClass) && Array.from(c.querySelectorAll(sel.messageList)).includes(list as DomNode)) scroller = c;
   }
   if (!scroller || typeof scroller.scrollTop !== "number") {
-    return { count: 0, moreAbove: false, problem: "No message scroller found." };
+    return { count: probe.count, oldestId: probe.oldestId, moreAbove: false, problem: "No message scroller found." };
   }
-  const count = list.querySelectorAll(sel.messageItem).length;
-  const moreAbove = list.querySelector(sel.loadingSkeleton) !== null;
-  // Setting scrollTop to its current value fires nothing; move first, then
-  // return to the top. Each move is followed by a synthetic scroll event:
-  // native scroll events are delivered with rendering frames, and a hidden
-  // tab renders none, so without the synthetic event Discord never notices
-  // the movement (verified live 2026-09-02: 51 rows became 81 in a hidden
-  // tab only with the events dispatched).
   const EventCtor = (globalThis as { Event?: new (type: string, init?: { bubbles?: boolean }) => unknown }).Event;
   const notify = (): void => {
     if (typeof scroller?.dispatchEvent === "function" && typeof EventCtor === "function") {
@@ -105,35 +135,17 @@ export function scrollNudge(root: DomRoot, sel: DiscordHistorySelectors): Scroll
   notify();
   scroller.scrollTop = 0;
   notify();
-  return { count, moreAbove, problem: null };
+  return probe;
 }
 
-/**
- * Current mounted-row count and whether more history is indicated.
- * SELF-CONTAINED: shipped to the browser via `Function.prototype.toString`.
- */
-export function mountedCount(root: DomRoot, sel: DiscordHistorySelectors): ScrollStepResult {
-  const list = root.querySelector(sel.messageList);
-  if (!list) return { count: 0, moreAbove: false, problem: "No message list found." };
-  return {
-    count: list.querySelectorAll(sel.messageItem).length,
-    moreAbove: list.querySelector(sel.loadingSkeleton) !== null,
-    problem: null,
-  };
+export function buildScrollNudgeExpression(channelId: string, selectors: DiscordHistorySelectors = DISCORD_HISTORY_SELECTORS): string {
+  if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
+  return buildPageExpression(scrollNudge, [selectors, channelId], [pinnedList, mountedCount]);
 }
 
-function buildSyncExpression(fn: (root: DomRoot, sel: DiscordHistorySelectors) => ScrollStepResult, selectors: DiscordHistorySelectors): string {
-  const source = fn.toString();
-  const shim = /\b__name\(/.test(source) ? "const __name = (fn) => fn; " : "";
-  return `(() => { ${shim}return (${source})(document, ${JSON.stringify(selectors)}); })()`;
-}
-
-export function buildScrollNudgeExpression(selectors: DiscordHistorySelectors = DISCORD_HISTORY_SELECTORS): string {
-  return buildSyncExpression(scrollNudge, selectors);
-}
-
-export function buildMountedCountExpression(selectors: DiscordHistorySelectors = DISCORD_HISTORY_SELECTORS): string {
-  return buildSyncExpression(mountedCount, selectors);
+export function buildMountedCountExpression(channelId: string, selectors: DiscordHistorySelectors = DISCORD_HISTORY_SELECTORS): string {
+  if (!isSnowflake(channelId)) throw new Error("channelId must be a Discord snowflake");
+  return buildPageExpression(mountedCount, [selectors, channelId], [pinnedList]);
 }
 
 export interface ScrollStepOptions {
@@ -151,32 +163,36 @@ export interface ScrollStepOptions {
 export interface ScrollStepOutcome {
   before: number;
   after: number;
+  /** True when older history mounted: more rows, or a different oldest row (virtualized lists swap rows). */
+  grew: boolean;
   moreAbove: boolean;
   problem: string | null;
 }
 
 /**
- * One backfill step, driven from Node: nudge, then poll the mounted count
- * with short evaluations until it grows or the wait expires.
+ * One backfill step for `channelId`, driven from Node: nudge, then poll the
+ * pinned list with short evaluations until older history mounts or the wait
+ * expires. Every evaluate and sleep is bounded by what is left of the wait.
  */
-export async function scrollStep(evaluate: Evaluate, options: ScrollStepOptions = {}): Promise<ScrollStepOutcome> {
+export async function scrollStep(evaluate: Evaluate, channelId: string, options: ScrollStepOptions = {}): Promise<ScrollStepOutcome> {
   const growWaitMs = options.growWaitMs ?? 3000;
   const pollMs = options.pollMs ?? 300;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = options.now ?? Date.now;
   const started = now();
   const left = (): number => Math.max(1, growWaitMs - (now() - started));
-  const nudge = (await evaluate(options.nudgeExpression ?? buildScrollNudgeExpression(), { timeoutMs: left() })) as ScrollStepResult;
-  if (nudge.problem !== null) return { before: nudge.count, after: nudge.count, moreAbove: false, problem: nudge.problem };
+  const nudge = (await evaluate(options.nudgeExpression ?? buildScrollNudgeExpression(channelId), { timeoutMs: left() })) as ScrollStepResult;
+  if (nudge.problem !== null) return { before: nudge.count, after: nudge.count, grew: false, moreAbove: false, problem: nudge.problem };
   let latest: ScrollStepResult = nudge;
+  const changed = (): boolean => latest.count !== nudge.count || latest.oldestId !== nudge.oldestId;
   while (now() - started < growWaitMs) {
     await sleep(Math.min(pollMs, left()));
     if (now() - started >= growWaitMs) break;
-    latest = (await evaluate(options.countExpression ?? buildMountedCountExpression(), { timeoutMs: left() })) as ScrollStepResult;
-    if (latest.problem !== null) return { before: nudge.count, after: latest.count, moreAbove: false, problem: latest.problem };
-    if (latest.count !== nudge.count) break;
+    latest = (await evaluate(options.countExpression ?? buildMountedCountExpression(channelId), { timeoutMs: left() })) as ScrollStepResult;
+    if (latest.problem !== null) return { before: nudge.count, after: latest.count, grew: false, moreAbove: false, problem: latest.problem };
+    if (changed()) break;
   }
-  return { before: nudge.count, after: latest.count, moreAbove: latest.moreAbove, problem: null };
+  return { before: nudge.count, after: latest.count, grew: changed(), moreAbove: latest.moreAbove, problem: null };
 }
 
 // --- Node side: the read_messages op ---
@@ -209,9 +225,17 @@ export interface ReadMessagesResult {
   count: number;
   /** Distinct rows examined across all windows (overlapping windows counted once). */
   scanned: number;
-  /** Oldest message id returned; pass as `before` to continue. Null when nothing was returned. */
+  /**
+   * Where to continue: the oldest message id returned, or `before` itself
+   * when an incomplete stop returned nothing yet. Null only when complete
+   * and nothing was returned.
+   */
   cursor: string | null;
-  /** True when the beginning of the channel was reached, or `limit` was filled. */
+  /**
+   * True when `limit` was filled, or the beginning of the channel was
+   * reached: two consecutive steps with no older history mounting and no
+   * loading placeholder above the rows.
+   */
   complete: boolean;
   /** True when a cap or the time budget stopped the op before `limit` was filled. */
   truncated: boolean;
@@ -245,6 +269,10 @@ const STEP_GROW_WAIT_MS = 3000;
 const MIN_STEP_MS = 400;
 
 const DEFAULTS = { limit: 50, scan_cap: 2000, time_budget_ms: 20_000, window_max_bytes: 4 * 1024 * 1024 } as const;
+/** Below the transport's default result cap, so a window can never be rejected on the wire. */
+const WINDOW_MAX_BYTES_CEILING = 8 * 1024 * 1024;
+/** Rows the extractor may keep per window; a mounted list larger than this is reported as a problem rather than silently trimmed. */
+const WINDOW_MAX_MESSAGES = 5000;
 
 /** Snowflakes are 64-bit; compare as BigInt, never as strings. */
 export function olderThan(id: string, cursor: string): boolean {
@@ -262,7 +290,7 @@ function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams,
     limit: Math.max(1, Math.min(500, Math.floor(p.limit ?? DEFAULTS.limit))),
     scan_cap: Math.max(1, Math.floor(p.scan_cap ?? DEFAULTS.scan_cap)),
     time_budget_ms: Math.max(1000, Math.floor(p.time_budget_ms ?? DEFAULTS.time_budget_ms)),
-    window_max_bytes: Math.max(64 * 1024, Math.floor(p.window_max_bytes ?? DEFAULTS.window_max_bytes)),
+    window_max_bytes: Math.min(WINDOW_MAX_BYTES_CEILING, Math.max(64 * 1024, Math.floor(p.window_max_bytes ?? DEFAULTS.window_max_bytes))),
     redact: p.redact === true,
   };
 }
@@ -276,8 +304,8 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   const started = now();
   const budgetLeft = (): number => p.time_budget_ms - (now() - started);
   const extractExpr = deps.extractExpression
-    ?? ((channelId: string, maxBytes: number) => buildExtractMessagesExpression({ channelId, maxBytes, maxMessages: 1000 }, DISCORD_SELECTORS));
-  const step = deps.scrollStep ?? ((ev: Evaluate, growWaitMs: number) => scrollStep(ev, { sleep: deps.sleep, now: deps.now, growWaitMs }));
+    ?? ((channelId: string, maxBytes: number) => buildExtractMessagesExpression({ channelId, maxBytes, maxMessages: WINDOW_MAX_MESSAGES }, DISCORD_SELECTORS));
+  const step = deps.scrollStep ?? ((ev: Evaluate, growWaitMs: number) => scrollStep(ev, p.channel_id, { sleep: deps.sleep, now: deps.now, growWaitMs }));
 
   const seen = new Map<string, DiscordMessage>();
   let label: string | null = null;
@@ -299,52 +327,75 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
 
   let noProgressStreak = 0;
   let lastStepGrew = true;
-  while (stop === null) {
-    if (budgetLeft() <= 0) { stop = "time_budget"; break; }
-    const window = (await deps.evaluate(
-      extractExpr(p.channel_id, p.window_max_bytes),
-      { timeoutMs: Math.max(1, budgetLeft()) },
-    )) as ExtractResult;
-    if (window.problem !== null && window.count === 0) {
-      stop = "problem";
-      problem = window.problem;
-      break;
+  // The beginning is declared only after two consecutive observations of no
+  // growth and no placeholder: a throttled hidden tab can briefly show
+  // neither while an older-row fetch is still pending.
+  let atBeginningStreak = 0;
+  try {
+    while (stop === null) {
+      if (budgetLeft() <= 0) { stop = "time_budget"; break; }
+      const window = (await deps.evaluate(
+        extractExpr(p.channel_id, p.window_max_bytes),
+        { timeoutMs: Math.max(1, budgetLeft()) },
+      )) as ExtractResult;
+      if (window.problem !== null && window.count === 0) {
+        stop = "problem";
+        problem = window.problem;
+        break;
+      }
+      if (window.truncated) {
+        // The extractor keeps the newest rows; a backfill needs the oldest.
+        // A window that exceeds the caps would drop exactly what the scroll
+        // just loaded, so stop and say so rather than spin.
+        stop = "problem";
+        problem = `The mounted window exceeds the extraction caps (window_max_bytes ${p.window_max_bytes}); raise window_max_bytes or lower limit.`;
+        break;
+      }
+      label = label ?? window.channel.label;
+
+      // Merge newest-first, admitting distinct rows only up to the scan
+      // allowance. Rows beyond it are neither examined nor returned, so a
+      // single large window cannot exceed `scan_cap` and report success.
+      let added = 0;
+      let capped = false;
+      for (let i = window.messages.length - 1; i >= 0; i--) {
+        const m = window.messages[i];
+        if (!isSnowflake(m.id) || examined.has(m.id)) continue; // pending/optimistic rows have no snowflake yet
+        if (examined.size >= p.scan_cap) { capped = true; break; }
+        examined.add(m.id);
+        seen.set(m.id, m);
+        added++;
+      }
+
+      if (wanted().length >= p.limit) { stop = "filled"; break; }
+      if (capped || examined.size >= p.scan_cap) { stop = "scan_cap"; break; }
+
+      // Progress is either older history mounting after the last step or new
+      // ids in this window. Three steps without either means Discord is not loading.
+      if (!lastStepGrew && added === 0) {
+        if (++noProgressStreak >= 3) { stop = "no_growth"; break; }
+      } else {
+        noProgressStreak = 0;
+      }
+
+      // A step that cannot fit in the remaining budget is not started.
+      const stepBudget = Math.min(STEP_GROW_WAIT_MS, budgetLeft() - MIN_STEP_MS);
+      if (stepBudget < MIN_STEP_MS) { stop = "time_budget"; break; }
+      const moved = await step(deps.evaluate, stepBudget);
+      if (moved.problem !== null) { stop = "problem"; problem = moved.problem; break; }
+      lastStepGrew = moved.grew;
+      if (!moved.grew && !moved.moreAbove) {
+        if (++atBeginningStreak >= 2) { stop = "beginning"; break; }
+      } else {
+        atBeginningStreak = 0;
+      }
     }
-    label = label ?? window.channel.label;
-
-    // Merge newest-first, admitting distinct rows only up to the scan
-    // allowance. Rows beyond it are neither examined nor returned, so a
-    // single large window cannot exceed `scan_cap` and report success.
-    let added = 0;
-    let capped = false;
-    for (let i = window.messages.length - 1; i >= 0; i--) {
-      const m = window.messages[i];
-      if (examined.has(m.id)) continue;
-      if (examined.size >= p.scan_cap) { capped = true; break; }
-      examined.add(m.id);
-      seen.set(m.id, m);
-      added++;
-    }
-
-    if (wanted().length >= p.limit) { stop = "filled"; break; }
-    if (capped || examined.size >= p.scan_cap) { stop = "scan_cap"; break; }
-
-    // Progress is either more mounted rows after the last step or new ids
-    // in this window (a virtualized list can swap rows without changing
-    // its count). Three steps without either means Discord is not loading.
-    if (!lastStepGrew && added === 0) {
-      if (++noProgressStreak >= 3) { stop = "no_growth"; break; }
-    } else {
-      noProgressStreak = 0;
-    }
-
-    // A step that cannot fit in the remaining budget is not started.
-    const stepBudget = Math.min(STEP_GROW_WAIT_MS, budgetLeft() - MIN_STEP_MS);
-    if (stepBudget < MIN_STEP_MS) { stop = "time_budget"; break; }
-    const moved = await step(deps.evaluate, stepBudget);
-    if (moved.problem !== null) { stop = "problem"; problem = moved.problem; break; }
-    lastStepGrew = moved.after !== moved.before;
-    if (!lastStepGrew && !moved.moreAbove) { stop = "beginning"; break; }
+  } catch (err) {
+    // A transport failure mid-loop must not discard what was collected: the
+    // partial envelope goes back with a cursor, and the cause is named.
+    const message = err instanceof Error ? err.message : String(err);
+    stop = /timed out/i.test(message) ? "time_budget" : "problem";
+    problem = message;
   }
 
   // Resolve grouped authors across windows from author_ref.
@@ -361,12 +412,16 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   const classified = classifyDiscordMessages(wanted().slice(0, p.limit), { redact: p.redact });
   const messages = classified.messages;
   const complete = stop === "filled" || stop === "beginning";
+  // Every incomplete stop is resumable: when nothing older than `before` was
+  // collected yet, the cursor is `before` itself so a caller continues from
+  // the same place instead of restarting at the newest message.
+  const cursor = messages.length > 0 ? messages[messages.length - 1].id : (complete ? null : p.before);
   return {
     channel: { id: p.channel_id, label },
     messages,
     count: messages.length,
     scanned: examined.size,
-    cursor: messages.length > 0 ? messages[messages.length - 1].id : null,
+    cursor,
     complete,
     truncated: !complete,
     stop_reason: stop ?? "problem",
