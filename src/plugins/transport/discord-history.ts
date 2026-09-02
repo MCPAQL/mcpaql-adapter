@@ -70,20 +70,39 @@ export function scrollNudge(root: DomRoot, sel: DiscordHistorySelectors): Scroll
   const list = root.querySelector(sel.messageList);
   if (!list) return { count: 0, moreAbove: false, problem: "No message list found." };
   // The scroller is the innermost scrollable ancestor of the list. DomNode has
-  // no parent pointer, so pick the last scroller (document order puts
-  // ancestors first) that contains the list.
-  const candidates = Array.from(root.querySelectorAll(`[class*="${sel.scrollerClass}"]`)) as
-    Array<DomNode & { scrollTop?: number; scrollHeight?: number }>;
-  let scroller: (DomNode & { scrollTop?: number; scrollHeight?: number }) | null = null;
-  for (const c of candidates) if (c.querySelector(sel.messageList) !== null) scroller = c;
+  // no parent pointer, so pick the last element (document order puts
+  // ancestors first) whose class list has a token with the exact stem
+  // `scroller` (Discord hashes classes as `scroller_<hash>`; wrappers like
+  // `scrollerContent_<hash>` share the substring but do not scroll) and
+  // that contains the list.
+  type Scroller = DomNode & { scrollTop?: number; scrollHeight?: number; dispatchEvent?: (event: unknown) => boolean };
+  const candidates = Array.from(root.querySelectorAll(`[class*="${sel.scrollerClass}"]`)) as Scroller[];
+  let scroller: Scroller | null = null;
+  for (const c of candidates) {
+    const stems = (c.getAttribute("class") ?? "").split(/\s+/).map((t) => t.split("_")[0]);
+    if (stems.includes(sel.scrollerClass) && c.querySelector(sel.messageList) !== null) scroller = c;
+  }
   if (!scroller || typeof scroller.scrollTop !== "number") {
     return { count: 0, moreAbove: false, problem: "No message scroller found." };
   }
   const count = list.querySelectorAll(sel.messageItem).length;
   const moreAbove = list.querySelector(sel.loadingSkeleton) !== null;
-  // Setting scrollTop to its current value fires nothing; move first, then return to the top.
+  // Setting scrollTop to its current value fires nothing; move first, then
+  // return to the top. Each move is followed by a synthetic scroll event:
+  // native scroll events are delivered with rendering frames, and a hidden
+  // tab renders none, so without the synthetic event Discord never notices
+  // the movement (verified live 2026-09-02: 51 rows became 81 in a hidden
+  // tab only with the events dispatched).
+  const EventCtor = (globalThis as { Event?: new (type: string, init?: { bubbles?: boolean }) => unknown }).Event;
+  const notify = (): void => {
+    if (typeof scroller?.dispatchEvent === "function" && typeof EventCtor === "function") {
+      scroller.dispatchEvent(new EventCtor("scroll", { bubbles: true }));
+    }
+  };
   scroller.scrollTop = Math.max(1, Math.min(600, (scroller.scrollHeight ?? 600) / 4));
+  notify();
   scroller.scrollTop = 0;
+  notify();
   return { count, moreAbove, problem: null };
 }
 

@@ -210,23 +210,29 @@ function scrollerPage(rows: number, moreAbove: boolean) {
     ...Array.from({ length: rows }, (_, i) => el("li", { id: `chat-messages-${CH}-${1000 + i}` })));
   const sidebarScroller = el("div", { class: "scroller_abc" }, el("ul", {}, el("li", {}, "dm"))) as FakeNode & { scrollTop: number };
   sidebarScroller.scrollTop = 0;
-  const scroller = el("div", { class: "scroller_abc customTheme_abc" }, list) as FakeNode & { scrollTop: number; scrollHeight: number };
+  const content = el("div", { class: "scrollerContent_abc content_abc" }, list) as FakeNode & { scrollTop: number };
+  content.scrollTop = 0;
+  const scroller = el("div", { class: "scroller_abc customTheme_abc" }, content) as FakeNode & { scrollTop: number; scrollHeight: number };
   scroller.scrollTop = 0;
   scroller.scrollHeight = 4000;
   const outer = el("div", { class: "scrollerBase_abc" }, sidebarScroller, scroller) as FakeNode & { scrollTop: number };
   outer.scrollTop = 0;
-  return { root: el("html", {}, el("body", {}, outer)), scroller, sidebarScroller, outer, list };
+  return { root: el("html", {}, el("body", {}, outer)), scroller, sidebarScroller, outer, content, list };
 }
 
-test("scrollNudge moves the innermost scroller containing the list, then returns to the top", () => {
-  const { root, scroller, sidebarScroller, outer } = scrollerPage(5, true);
+test("scrollNudge moves the innermost scroller containing the list, returns to the top, and dispatches scroll events", () => {
+  const { root, scroller, sidebarScroller, outer, content } = scrollerPage(5, true);
   const moves: number[] = [];
+  const events: string[] = [];
   Object.defineProperty(scroller, "scrollTop", { get: () => moves[moves.length - 1] ?? 0, set: (v: number) => { moves.push(v); } });
+  (scroller as unknown as { dispatchEvent: (e: { type: string; bubbles: boolean }) => boolean }).dispatchEvent = (e) => { events.push(`${e.type}:${e.bubbles}`); return true; };
   const r = scrollNudge(root, DISCORD_HISTORY_SELECTORS);
   assert.deepEqual(r, { count: 5, moreAbove: true, problem: null });
   assert.deepEqual(moves.map((m) => m > 0), [true, false], "a real movement, then back to the top");
+  assert.deepEqual(events, ["scroll:true", "scroll:true"], "a synthetic scroll event after each move, so hidden tabs notice");
   assert.equal(sidebarScroller.scrollTop, 0, "the DM sidebar scroller is never touched");
   assert.equal(outer.scrollTop, 0, "the outer container is never touched");
+  assert.equal(content.scrollTop, 0, "the inner content wrapper (class contains 'scroller') is not the scroller");
 });
 
 test("mountedCount reports rows and whether more history is indicated", () => {

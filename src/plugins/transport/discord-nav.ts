@@ -356,22 +356,6 @@ export async function openChannel(
     } catch {
       ok = false; // context still being replaced; keep polling
     }
-    return { channelId: target.channelId, path, alreadyOpen: true, elapsedMs: Date.now() - started };
-  }
-  try {
-    await evaluate(navigateExpression(path), { timeoutMs: remaining() });
-  } catch {
-    // Same-document navigation can destroy the execution context before the
-    // evaluate returns; the mount poll below decides whether it worked.
-  }
-  while (Date.now() - started < timeoutMs) {
-    await sleep(pollMs);
-    let ok = false;
-    try {
-      ok = (await evaluate(mounted, { timeoutMs: remaining() })) === true;
-    } catch {
-      ok = false; // context still being replaced; keep polling
-    }
     if (ok) return { channelId: target.channelId, path, alreadyOpen: false, elapsedMs: Date.now() - started };
   }
   throw new Error(`Channel ${target.channelId} did not open within ${timeoutMs}ms (path ${path}). Check that the user can see it.`);
