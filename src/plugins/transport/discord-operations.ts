@@ -21,6 +21,7 @@
  */
 
 import { CdpTransportError } from "./browser-cdp.js";
+import { DISCORD_ORIGIN } from "./discord-config.js";
 import { readMessages, type ReadMessagesDeps, type ReadMessagesParams } from "./discord-history.js";
 import {
   DEFAULT_LIST_LIMIT,
@@ -73,8 +74,8 @@ export interface DiscordOperation {
 /** The only tool an all-read adapter exposes. */
 export const DISCORD_TOOL_NAME = "mcp_aql_read";
 
-/** The origin the transport is pinned to; nothing else is ever attached. */
-export const DISCORD_ORIGIN = "https://discord.com";
+export { DISCORD_ORIGIN };
+
 
 /** The MCP-AQL specification version this adapter implements (`_protocol.version` in introspection). */
 export const MCPAQL_SPEC_VERSION = "1.0.0-alpha.1";
@@ -364,9 +365,13 @@ export function scanExpression(expression: string, effects: readonly DeclaredEff
   // Every history call must be the exact shape `navigateExpression` emits, with a
   // literal channel path; any other spelling (single quotes, a variable, a
   // relative segment) is refused rather than validated.
-  const historyCalls = (expression.match(/history\.(?:push|replace)State\(/g) ?? []).length;
+  // Any mention of the mutation methods counts, however reached (dot, bracket,
+  // optional chain, an alias): each must be one of the strict matches.
+  const mentions = (expression.match(/(?:push|replace)State/g) ?? []).length;
   const strict = [...expression.matchAll(/history\.(?:push|replace)State\(\{\}, "", "([^"]*)"\)/g)];
-  if (strict.length !== historyCalls) return "navigates with a shape the guard cannot validate (only history.pushState({}, \"\", \"<literal path>\") is allowed)";
+  if (strict.length !== mentions || /history\s*(?:\[|\?\.)/.test(expression)) {
+    return "navigates with a shape the guard cannot validate (only history.pushState({}, \"\", \"<literal path>\") is allowed)";
+  }
   for (const m of strict) {
     if (!CHANNEL_PATH.test(m[1])) return `navigates to ${JSON.stringify(m[1])}, not a channel path`;
   }

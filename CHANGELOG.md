@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Runnable read-only Discord adapter (`src/servers/discord.ts`, `src/bin/discord.ts`) — closes #52 for the read-only Discord adapter (#38)
+  - `createDiscordServer` is an MCP server with one tool, `mcp_aql_read` (annotated read-only), dispatching `introspect` and the four read operations through the operation layer; every answer is the MCP-AQL envelope as JSON text and every failure is an envelope, never an MCP error; operations run one at a time in arrival order so two reads never fight over the one Discord tab
+  - `src/bin/discord.ts` (package `bin`: `mcpaql-discord`; `npm run discord` in development) resolves `MCPAQL_CDP_*` from the environment (an invalid value exits 2 naming the variable), wires `BrowserCdpTransport`, serves over stdio with nothing but MCP on stdout, and probes the DevTools port once after the handshake, printing both launch commands to stderr when it is closed
+  - Tests cover the server over an in-memory MCP transport, the closed-port path through the real CDP transport, and the entry point as a child process speaking JSON-RPC over stdio
+  - New dependency: `@modelcontextprotocol/sdk`; `engines.node >= 22` (the transport uses Node's built-in WebSocket)
+  - Guide updated: Setup covers running the server and configuring a client; Operations covers call shapes, the envelope and its error codes, and introspection
+
 - Discord MCP-AQL operation layer (`src/plugins/transport/discord-operations.ts`) — first piece of the runnable adapter (#38, part of #52)
   - `DISCORD_OPERATIONS` registers the four read operations (`list_dms`, `list_guilds`, `list_channels`, `read_messages`) with parameter definitions, danger level, and the one documented side effect; `validateParams` fills defaults, clamps integer bounds, treats `null` as absent, and refuses unknown parameters with `VALIDATION_UNKNOWN_PARAM` rather than ignoring them
   - `runDiscordOperation` maps each operation to the library (`buildListExpression` + the transport's `evaluate`, `readMessages`) and never throws: every failure is the `{ success: false, error }` envelope, with transport codes kept (a closed port is `TRANSPORT_CDP_PORT_CLOSED` with the launch hint), a channel that never mounts as `NOT_FOUND_RESOURCE`, and anything else as `INTERNAL_ERROR`
@@ -119,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord `read_messages` right after a navigation: the route changes and the message list mounts before the rows render (observed live through the runnable adapter), so the first extraction reported the channel "not in view" and the read stopped with a problem. The read now polls for up to 3 s after a navigation before reporting that problem, and a budget that runs out during that wait is a `time_budget` stop rather than a problem; a channel that was already open gets no grace and behaves as before (#38)
 - Non-zero osascript exit codes are now reported correctly: the transport read `error.status` (only set by sync child_process APIs) instead of `error.code`, so every non-zero exit surfaced as exit code 1
 - Native transport failures no longer surface as an empty message: `TRANSPORT_NATIVE_EXECUTION_ERROR` / `TRANSPORT_NATIVE_TIMEOUT` always name the exit code or signal and elapsed time, truncate oversized stderr, and include a stdout preview when stderr is empty (#32 section C; failure mode observed in adapter-generator#42)
 

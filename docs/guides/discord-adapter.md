@@ -4,7 +4,7 @@ The Discord adapter reads your Discord conversations out of the Discord web clie
 
 ## Status
 
-What this repository ships today is the adapter as a **library**: the transport, the page scripts, the listing and history functions, and the read-only and untrusted-content checks, all under `src/plugins/transport/`. The runnable server that exposes them as MCP-AQL operations to a client is tracked separately; until it lands, the operations below are library functions called from code, and the setup section describes what that server will need from you.
+The adapter ships as a runnable MCP server (`src/bin/discord.ts`, built to `dist/bin/discord.js`) over a library (`src/plugins/transport/`): the transport, the page scripts, the listing and history functions, the read-only and untrusted-content checks, the operation layer, and the configuration. A client configured as below can call `list_dms`, `list_guilds`, `list_channels`, and `read_messages` against a live Discord tab. Search through the in-client search box is not implemented (tracked separately); direct messages and channels do not need it.
 
 ## What it is, and what it is not
 
@@ -33,7 +33,46 @@ What this repository ships today is the adapter as a **library**: the transport,
 
    The transport connects to `127.0.0.1:9222` unless its `port` option says otherwise. When the port is closed, the error message includes both commands above.
 
-2. Point the adapter at that Chrome. Today that means constructing `BrowserCdpTransport({ allowedOrigin: "https://discord.com" })` from code; the runnable server will take the same setting from its configuration.
+2. Run the adapter from this repository and point your MCP client at it. It speaks MCP over stdio.
+
+   ```sh
+   npm install
+   npm run build          # produces dist/bin/discord.js
+   ```
+
+   Claude Code:
+
+   ```sh
+   claude mcp add discord -- node /path/to/mcpaql-adapter/dist/bin/discord.js
+   ```
+
+   Any client that takes a JSON server entry:
+
+   ```json
+   {
+     "mcpServers": {
+       "discord": {
+         "command": "node",
+         "args": ["/path/to/mcpaql-adapter/dist/bin/discord.js"],
+         "env": { "MCPAQL_CDP_PORT": "9222" }
+       }
+     }
+   }
+   ```
+
+   During development, `npm run discord` (or `npx tsx src/bin/discord.ts`) runs the same entry point without a build.
+
+3. Configuration is three environment variables; unset means the default. A set value that is invalid is refused by name at startup (exit code 2), never silently defaulted.
+
+   | Variable | Default | Meaning |
+   |---|---|---|
+   | `MCPAQL_CDP_PORT` | `9222` | The `--remote-debugging-port` you gave Chrome. |
+   | `MCPAQL_CDP_HOST` | `127.0.0.1` | Loopback only (`127.0.0.1`, `localhost`, `::1`). The adapter never attaches to a browser on another machine. |
+   | `MCPAQL_CDP_TIMEOUT_MS` | `10000` | Bound on each DevTools call. |
+
+   The origin is fixed at `https://discord.com`. The result size cap of the transport (10 MiB per evaluation) is not configurable; `read_messages` stays well under it by default.
+
+At startup the adapter prints one line to stderr saying where it will look, then probes the port once (bounded to 3 s, after the MCP handshake, so your client never waits on Chrome). A closed port prints the launch commands; an open port with no attachable Discord tab prints why. The server serves either way, and every call returns the same named error until Chrome is up.
 
 Keep the Discord tab open. It can be in the background, in another window, and unfocused: the adapter works with the tab hidden.
 
@@ -47,14 +86,26 @@ Discord prohibits automating user accounts. This adapter does not use the Discor
 
 ## Operations
 
-All operations are reads.
+All operations are reads, served by one MCP tool, `mcp_aql_read`, which is annotated read-only. Call it with `{ operation, params }`:
+
+```javascript
+{ operation: "list_dms", params: { limit: 50 } }
+{ operation: "read_messages", params: { channel_id: "1520443442982031486", limit: 100 } }
+{ operation: "introspect", params: { query: "operations", name: "read_messages" } }
+```
+
+Every answer is the MCP-AQL envelope as JSON text: `{ success: true, data }` or `{ success: false, error: { code, message, details } }`. A failure is always an envelope, never a transport-level error: an unknown operation is `NOT_FOUND_OPERATION`, a missing or malformed parameter is `VALIDATION_MISSING_PARAM` or `VALIDATION_INVALID_TYPE`, an unknown parameter is `VALIDATION_UNKNOWN_PARAM` (a misspelled `chanel_id` cannot silently read the wrong thing), a closed port is `TRANSPORT_CDP_PORT_CLOSED` with the launch commands in the message, and a channel that never opens is `NOT_FOUND_RESOURCE`. `introspect` with `query: "operations"` lists every operation; with a `name` it returns that operation's parameters, defaults, and bounds; `query: "types"` describes the result shapes.
+
+Operations run one at a time, in arrival order: two reads at once would fight over the one Discord tab.
 
 | Operation | Function | Parameters | Returns |
 |---|---|---|---|
-| `list_dms` | `listDms` via `buildListExpression("listDms")` | `limit` | Direct and group conversations: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded. |
-| `list_guilds` | `listGuilds` via `buildListExpression("listGuilds")` | `limit` | Servers you belong to: id, name, and the raw sidebar label. |
-| `list_channels` | `listChannels` via `buildListExpression("listChannels")` | `limit` | Text and voice channels of the open server with their category, plus the server's id and name. |
+| `list_dms` | `listDms` via `buildListExpression("listDms")` | `limit` (200) | Direct and group conversations: id, name, kind, presence, unread. Friends, Nitro, Shop, and message requests are excluded. |
+| `list_guilds` | `listGuilds` via `buildListExpression("listGuilds")` | `limit` (200) | Servers you belong to: id, name, and the raw sidebar label. |
+| `list_channels` | `listChannels` via `buildListExpression("listChannels")` | `limit` (200) | Text and voice channels of the server currently open in the tab with their category, plus the server's id and name. To read another server, open it in the Discord tab first; it is your screen. |
 | `read_messages` | `readMessages` | `channel_id` (required), `guild_id`, `before`, `limit` (50), `scan_cap` (2000), `time_budget_ms` (20000), `window_max_bytes` (4 MiB), `redact` (false) | Messages newest first with author, timestamp, full text, replies, reactions, attachment links, embeds, links, edited flag. |
+
+Integer parameters outside their bounds are clamped, not refused; `introspect` reports the bounds.
 
 The three listings return `{ items, count, truncated, problem }`. They read what the sidebar shows at that moment; `truncated` means `limit` cut the list, and there is no cursor: raise `limit` and call again.
 
@@ -87,6 +138,7 @@ Each table has fixture tests built from observed markup. When Discord changes so
 
 ## How it works, briefly
 
+- **Server.** One MCP tool over stdio, `mcp_aql_read`, dispatching by operation name to the operation layer (`discord-operations.ts`): schema-driven parameter validation, the `{ success, data | error }` envelope, and introspection. The server never writes to stdout except MCP; setup and probe messages go to stderr.
 - **Transport.** A read-only session over the Chrome DevTools Protocol to your already-running Chrome, using the WebSocket client built into Node. Exactly one protocol method is allowed, `Runtime.evaluate`; the allowlist is tested. The session is pinned to `https://discord.com`: the origin is checked inside every evaluation, so a tab that navigates away never runs a script.
 - **Scripts.** Each page script is a self-contained function that is unit-tested in Node against a small fake DOM and shipped to the browser as its own source text. What the tests ran is what the page runs; a test transpiles the module the way the build does and proves the result runs in a bare context.
 - **History.** Discord loads older messages when the list is scrolled to the top. The adapter nudges the real scroller, dispatches a synthetic scroll event (hidden tabs never render a native one), and polls from the Node side for the list to grow. All waiting happens in Node, because hidden tabs throttle in-page timers.

@@ -36,7 +36,7 @@ import {
   type DomRoot,
   type ExtractResult,
 } from "./discord-dom.js";
-import { OpenChannelTimeout, isSnowflake, openChannel, type Evaluate } from "./discord-nav.js";
+import { OpenChannelTimeout, isSnowflake, openChannel, type Evaluate, type OpenChannelResult } from "./discord-nav.js";
 import { classifyChannelLabel, classifyDiscordMessages, type UntrustedFlag } from "./discord-untrusted.js";
 import type { SecuritySeverity } from "../../security/types.js";
 
@@ -265,6 +265,15 @@ export interface ReadMessagesDeps {
 
 /** Longest a single scroll step may wait for Discord to prepend rows. */
 const STEP_GROW_WAIT_MS = 3000;
+/**
+ * After a navigation, how long the first extraction may keep finding the
+ * channel "not in view" before that is reported as a problem. The route
+ * changes before the rows render (observed live: the location matched, the
+ * list existed, the rows arrived a moment later), so an immediate extraction
+ * can miss a channel that is in fact opening.
+ */
+const OPEN_SETTLE_MS = 3000;
+const OPEN_SETTLE_POLL_MS = 250;
 /** A step needs at least this much budget to be worth starting. */
 const MIN_STEP_MS = 400;
 
@@ -301,6 +310,7 @@ function resolveParams(p: ReadMessagesParams): Required<Omit<ReadMessagesParams,
 export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesParams): Promise<ReadMessagesResult> {
   const p = resolveParams(params);
   const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const started = now();
   const budgetLeft = (): number => p.time_budget_ms - (now() - started);
   const extractExpr = deps.extractExpression
@@ -321,8 +331,9 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
   };
 
   const openBudget = (): number => Math.max(1000, Math.min(15_000, budgetLeft()));
+  let opened: OpenChannelResult;
   try {
-    await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
+    opened = await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id, messageId: p.before }, {
       timeoutMs: openBudget(),
       sleep: deps.sleep,
     });
@@ -331,8 +342,10 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
     // still navigates to the surrounding history. Fall back to the channel
     // being open at all and let the loop and the `before` filter do the rest.
     if (!(err instanceof OpenChannelTimeout) || p.before === null) throw err;
-    await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id }, { timeoutMs: openBudget(), sleep: deps.sleep });
+    opened = await openChannel(deps.evaluate, { guildId: p.guild_id, channelId: p.channel_id }, { timeoutMs: openBudget(), sleep: deps.sleep });
   }
+  // A channel that was already open is fully rendered; one we just navigated to may still be rendering its rows.
+  const settleUntil = opened.alreadyOpen ? 0 : now() + OPEN_SETTLE_MS;
 
   let noProgressStreak = 0;
   let lastStepGrew = true;
@@ -348,6 +361,19 @@ export async function readMessages(deps: ReadMessagesDeps, params: ReadMessagesP
         { timeoutMs: Math.max(1, budgetLeft()) },
       )) as ExtractResult;
       if (window.problem !== null && window.count === 0) {
+        // Only a rendering delay gets the grace period; a cap failure (truncated) is permanent and named below.
+        if (now() < settleUntil && !window.truncated) {
+          // Still within the grace period. Running out of budget while the
+          // channel is rendering is a budget stop, not proof of a problem.
+          if (budgetLeft() <= OPEN_SETTLE_POLL_MS) {
+            await sleep(Math.max(0, budgetLeft()));
+            stop = "time_budget";
+            problem = window.problem;
+            break;
+          }
+          await sleep(OPEN_SETTLE_POLL_MS);
+          continue;
+        }
         stop = "problem";
         problem = window.problem;
         break;
